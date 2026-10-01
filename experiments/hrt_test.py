@@ -18,7 +18,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import numpy as np
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from config import C, SYSTEM, ARRAY, SIM, PRT
@@ -32,7 +31,7 @@ from transforms.hrt import hyperbolic_radon_transform, hrt_peak
 # Experiment settings
 # ============================================================
 
-SNR_DB = SIM.snr_db*100
+SNR_DB = SIM.snr_db
 N_POSITIONS = 250
 
 R_MIN, R_MAX = 50.0, 400.0
@@ -40,7 +39,7 @@ THETA_MIN, THETA_MAX = -60.0, 60.0
 
 CLOCK_OFFSET = 10e-9
 
-HRT_DR = 0.1
+HRT_DR = 1
 HRT_DTHETA = PRT.theta_step_deg
 HRT_DTAU = SYSTEM.dt/4
 
@@ -127,7 +126,13 @@ def main():
         tau_true = R_true / C + CLOCK_OFFSET
 
         time_axis = build_time_axis(R_true, theta_true, CLOCK_OFFSET, antenna_x)
-        clean_rx, _ = received_signal(time_axis, R_true, theta_true, clock_offset=CLOCK_OFFSET, antenna_x=antenna_x)
+        clean_rx, _ = received_signal(
+            time_axis,
+            R_true,
+            theta_true,
+            clock_offset=CLOCK_OFFSET,
+            antenna_x=antenna_x,
+        )
         noisy_rx, _ = add_awgn(clean_rx, snr_db=SNR_DB, rng=rng_noise)
         mf_rx = matched_filter(noisy_rx)
 
@@ -135,8 +140,20 @@ def main():
         theta_grid = local_grid(THETA_GLOBAL, theta_true, THETA_HALF_WIDTH)
         tau_grid = local_tau_grid(tau_true)
 
-        hrt = hyperbolic_radon_transform(mf_rx, time_axis, antenna_x, range_grid, theta_grid, tau_grid)
-        tau_hat, R_hat, theta_hat, _, _ = hrt_peak(hrt, tau_grid, range_grid, theta_grid)
+        hrt = hyperbolic_radon_transform(
+            mf_rx,
+            time_axis,
+            antenna_x,
+            range_grid,
+            theta_grid,
+            tau_grid,
+        )
+        tau_hat, R_hat, theta_hat, _, _ = hrt_peak(
+            hrt,
+            tau_grid,
+            range_grid,
+            theta_grid,
+        )
 
         x_true, y_true = polar_to_xy(R_true, theta_true)
         x_hat, y_hat = polar_to_xy(R_hat, theta_hat)
@@ -180,6 +197,8 @@ def main():
     tau_stat = summarize(tau_error)
     xy_stat = summarize(xy_error)
 
+    average_localization_error = np.mean(xy_error)
+
     rmse_x = np.sqrt(np.mean(dx**2))
     rmse_y = np.sqrt(np.mean(dy**2))
     rmse_xy = np.sqrt(np.mean(dx**2 + dy**2))
@@ -209,58 +228,15 @@ def main():
 
     print("\n2-D POSITION ERROR")
     print("=" * 80)
-    print(f"Mean Euclidean error : {xy_stat['mean']:.4f} m")
-    print(f"Median               : {xy_stat['median']:.4f} m")
-    print(f"P95                  : {xy_stat['p95']:.4f} m")
-    print(f"P99                  : {xy_stat['p99']:.4f} m")
-    print(f"Max                  : {xy_stat['max']:.4f} m")
-    print(f"RMSE x                : {rmse_x:.4f} m")
-    print(f"RMSE y                : {rmse_y:.4f} m")
-    print(f"2-D RMSE              : {rmse_xy:.4f} m")
-
-    worst = np.argmax(xy_error)
-    print("\nWORST 2-D CASE")
-    print("=" * 80)
-    print(f"R_true      : {R_true[worst]:.4f} m")
-    print(f"theta_true  : {theta_true[worst]:.4f} deg")
-    print(f"|R error|   : {R_error[worst]:.4f} m")
-    print(f"|theta err| : {theta_error[worst]:.4f} deg")
-    print(f"|tau err|   : {tau_error[worst]:.4f} ps")
-    print(f"2-D error   : {xy_error[worst]:.4f} m")
-
-    plt.figure(figsize=(8, 5))
-    plt.scatter(R_true, R_error, s=15, alpha=0.6)
-    plt.xlabel("True range R (m)")
-    plt.ylabel("Absolute range error (m)")
-    plt.title("HRT Range Error versus User Range")
-    plt.grid(True)
-    plt.tight_layout()
-
-    plt.figure(figsize=(8, 5))
-    plt.scatter(theta_true, R_error, s=15, alpha=0.6)
-    plt.xlabel("True angle theta (deg)")
-    plt.ylabel("Absolute range error (m)")
-    plt.title("HRT Range Error versus User Angle")
-    plt.grid(True)
-    plt.tight_layout()
-
-    plt.figure(figsize=(8, 5))
-    plt.scatter(R_true, theta_true, c=xy_error, s=25)
-    plt.colorbar(label="2-D position error (m)")
-    plt.xlabel("True range R (m)")
-    plt.ylabel("True angle theta (deg)")
-    plt.title("HRT 2-D Position Error over User Space")
-    plt.tight_layout()
-
-    plt.figure(figsize=(8, 5))
-    plt.hist(xy_error, bins=25)
-    plt.xlabel("2-D position error (m)")
-    plt.ylabel("Count")
-    plt.title("HRT 2-D Position Error Distribution")
-    plt.grid(True)
-    plt.tight_layout()
-
-    plt.show()
+    print(f"Average localization error : {average_localization_error:.4f} m")
+    print(f"Mean Euclidean error       : {xy_stat['mean']:.4f} m")
+    print(f"Median                     : {xy_stat['median']:.4f} m")
+    print(f"P95                        : {xy_stat['p95']:.4f} m")
+    print(f"P99                        : {xy_stat['p99']:.4f} m")
+    print(f"Max                        : {xy_stat['max']:.4f} m")
+    print(f"RMSE x                     : {rmse_x:.4f} m")
+    print(f"RMSE y                     : {rmse_y:.4f} m")
+    print(f"2-D RMSE                   : {rmse_xy:.4f} m")
 
 
 if __name__ == "__main__":

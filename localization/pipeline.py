@@ -1,15 +1,15 @@
 """
-PRT -> ROI -> HRT near-field localization pipeline.
+PRT -> ROI -> HRT localization pipeline.
 
-Purpose:
-1. Apply matched filtering to the received array signal.
-2. Run PRT over the global parameter space for coarse estimation of tau, R and theta.
-3. Use the PRT estimate to construct a physically motivated ROI.
-4. Run exact spherical-wave HRT only inside that ROI.
-5. Return the final HRT estimate in both polar (R, theta, tau) and Cartesian (x, y) coordinates.
+Modes:
+1. localize(rx, time_axis, antenna_x)
+   -> blind/global PRT: global p, global tau, global q.
 
-This file only connects existing modules. It does not generate signals, add noise,
-or use any ground-truth user position.
+2. localize(rx, time_axis, antenna_x, theta_hint, tau_hint)
+   -> preliminary truth-assisted PRT:
+      4 p bins around theta_hint, 4 tau bins around tau_hint, global q.
+
+After PRT, ROI and HRT do not use hints.
 """
 
 from dataclasses import dataclass
@@ -18,22 +18,23 @@ import numpy as np
 from config import C, SYSTEM, PRT
 from signal_model.matched_filter import matched_filter
 from transforms.prt import parabolic_radon_transform
-from transforms.hrt import hyperbolic_radon_transform, hrt_peak
+from transforms.hrt import hyperbolic_radon_transform
 from localization.parameter_mapping import pq_to_range, p_to_theta_deg
 from localization.roi import build_roi
 
 
 # ============================================================
-# Global PRT search space
+# PRT settings
 # ============================================================
 
-PRT_THETA_MIN, PRT_THETA_MAX = -65.0, 65.0
+PRT_THETA_MIN, PRT_THETA_MAX = -60.0, 60.0
 PRT_R_MIN, PRT_R_MAX = 40.0, 500.0
+N_LOCAL_P, N_LOCAL_TAU = 4, 4
 
-THETA_PRT = np.arange(PRT_THETA_MIN, PRT_THETA_MAX + 0.5 * PRT.theta_step_deg, PRT.theta_step_deg)
-P_GRID = -np.sin(np.deg2rad(THETA_PRT)) / C
+THETA_GRID = np.arange(PRT_THETA_MIN, PRT_THETA_MAX + 0.5 * PRT.theta_step_deg, PRT.theta_step_deg)
+P_GRID_GLOBAL = -np.sin(np.deg2rad(THETA_GRID)) / C
 
-Q_MIN = np.cos(np.deg2rad(max(abs(PRT_THETA_MIN), abs(PRT_THETA_MAX))))**2 / (2.0 * PRT_R_MAX * C)
+Q_MIN = np.cos(np.deg2rad(60.0))**2 / (2.0 * PRT_R_MAX * C)
 Q_MAX = 1.0 / (2.0 * PRT_R_MIN * C)
 Q_GRID = np.arange(Q_MIN - 2 * PRT.dq, Q_MAX + 2 * PRT.dq, PRT.dq)
 
@@ -53,92 +54,117 @@ HRT_DTAU = SYSTEM.dt / 4
 
 @dataclass
 class LocalizationResult:
-    R: float
-    theta: float
-    tau: float
-    x: float
-    y: float
-
-    prt_R: float
-    prt_theta: float
-    prt_tau: float
-
-    roi: object
-    hrt_peak: float
+    R: float; theta: float; tau: float; x: float; y: float
+    prt_R: float; prt_theta: float; prt_tau: float
+    roi: object; prt_peak: float; hrt_peak: float
 
 
 # ============================================================
 # Helpers
 # ============================================================
 
+def nearest_indices(grid, value, n):
+    i = np.searchsorted(grid, value)
+    start = int(np.clip(i - n // 2, 0, len(grid) - n))
+    return np.arange(start, start + n)
+
+
+def local_p_grid(theta_hint):
+    return P_GRID_GLOBAL[nearest_indices(THETA_GRID, theta_hint, N_LOCAL_P)]
+
+
+def local_tau_indices(time_axis, tau_hint):
+    return nearest_indices(time_axis, tau_hint, N_LOCAL_TAU)
+
+
 def fixed_grid(lo, hi, step):
     k0, k1 = int(np.ceil(lo / step)), int(np.floor(hi / step))
-    if k1 >= k0:
-        return np.arange(k0, k1 + 1) * step
-    return np.array([(lo + hi) / 2.0])
-
-
-def prt_peak(prt, time_axis):
-    i = np.unravel_index(np.argmax(np.abs(prt)), prt.shape)
-    return float(time_axis[i[0]]), float(P_GRID[i[1]]), float(Q_GRID[i[2]])
+    return np.arange(k0, k1 + 1) * step if k1 >= k0 else np.array([(lo + hi) / 2.0])
 
 
 def polar_to_xy(R, theta_deg):
-    theta = np.deg2rad(theta_deg)
-    return float(R * np.sin(theta)), float(R * np.cos(theta))
+    t = np.deg2rad(theta_deg)
+    return float(R * np.sin(t)), float(R * np.cos(t))
+
+
+def valid_pq_mask(p_grid):
+    P, Q = np.meshgrid(p_grid, Q_GRID, indexing="ij")
+    R = pq_to_range(P, Q)
+    return np.isfinite(R) & (R >= PRT_R_MIN) & (R <= PRT_R_MAX)
 
 
 # ============================================================
-# PRT coarse localization
+# PRT peak selection
 # ============================================================
 
-def run_prt(mf_rx, time_axis, antenna_x):
-    prt = parabolic_radon_transform(mf_rx, antenna_x, P_GRID, Q_GRID)
-    tau_hat, p_hat, q_hat = prt_peak(prt, time_axis)
+def find_prt_peak_local(prt, time_axis, p_grid, tau_hint):
+    tau_idx = local_tau_indices(time_axis, tau_hint)
+    valid = valid_pq_mask(p_grid)
+    score = np.where(valid[None, :, :], np.abs(prt[tau_idx]), -np.inf)
+    i = np.unravel_index(np.argmax(score), score.shape)
+    return float(time_axis[tau_idx[i[0]]]), float(p_grid[i[1]]), float(Q_GRID[i[2]]), float(score[i])
 
-    theta_hat = float(p_to_theta_deg(p_hat))
-    R_hat = float(pq_to_range(p_hat, q_hat))
 
-    return R_hat, theta_hat, tau_hat
+def find_prt_peak_global(prt, time_axis, p_grid):
+    valid = valid_pq_mask(p_grid)
+    score = np.where(valid[None, :, :], np.abs(prt), -np.inf)
+    i = np.unravel_index(np.argmax(score), score.shape)
+    return float(time_axis[i[0]]), float(p_grid[i[1]]), float(Q_GRID[i[2]]), float(score[i])
 
 
 # ============================================================
-# HRT fine localization
+# PRT
 # ============================================================
+
+def run_prt(mf_rx, time_axis, antenna_x, theta_hint=None, tau_hint=None):
+    local_mode = theta_hint is not None and tau_hint is not None
+    p_grid = local_p_grid(theta_hint) if local_mode else P_GRID_GLOBAL
+
+    prt = parabolic_radon_transform(mf_rx, antenna_x, p_grid, Q_GRID)
+
+    if local_mode:
+        tau_hat, p_hat, q_hat, peak = find_prt_peak_local(prt, time_axis, p_grid, tau_hint)
+    else:
+        tau_hat, p_hat, q_hat, peak = find_prt_peak_global(prt, time_axis, p_grid)
+
+    return float(pq_to_range(p_hat, q_hat)), float(p_to_theta_deg(p_hat)), tau_hat, peak
+
+
+# ============================================================
+# HRT
+# ============================================================
+
+def find_hrt_peak(hrt, tau_grid, range_grid, theta_grid):
+    score = np.abs(hrt)
+    i = np.unravel_index(np.argmax(score), score.shape)
+    return float(range_grid[i[1]]), float(theta_grid[i[2]]), float(tau_grid[i[0]]), float(score[i])
+
 
 def run_hrt(mf_rx, time_axis, antenna_x, roi):
-    range_grid = fixed_grid(roi.R_min, roi.R_max, HRT_DR)
+    r_grid = fixed_grid(roi.R_min, roi.R_max, HRT_DR)
     theta_grid = fixed_grid(roi.theta_min, roi.theta_max, HRT_DTHETA)
     tau_grid = fixed_grid(roi.tau_min, roi.tau_max, HRT_DTAU)
 
-    hrt = hyperbolic_radon_transform(mf_rx, time_axis, antenna_x, range_grid, theta_grid, tau_grid)
-    tau_hat, R_hat, theta_hat, peak, _ = hrt_peak(hrt, tau_grid, range_grid, theta_grid)
-
-    return float(R_hat), float(theta_hat), float(tau_hat), float(abs(peak))
+    hrt = hyperbolic_radon_transform(mf_rx, time_axis, antenna_x, r_grid, theta_grid, tau_grid)
+    return find_hrt_peak(hrt, tau_grid, r_grid, theta_grid)
 
 
 # ============================================================
-# Complete localization pipeline
+# Complete pipeline
 # ============================================================
 
-def localize(rx, time_axis, antenna_x):
-    # 1. Matched filter
+def localize(rx, time_axis, antenna_x, theta_hint=None, tau_hint=None):
+    if (theta_hint is None) != (tau_hint is None):
+        raise ValueError("theta_hint and tau_hint must be provided together.")
+
     mf_rx = matched_filter(rx)
+    R_prt, theta_prt, tau_prt, prt_peak = run_prt(mf_rx, time_axis, antenna_x, theta_hint, tau_hint)
 
-    # 2. PRT coarse localization
-    R_prt, theta_prt, tau_prt = run_prt(mf_rx, time_axis, antenna_x)
+    roi = build_roi(R_prt, theta_prt, tau_prt, range_bounds=(PRT_R_MIN, PRT_R_MAX),
+                    theta_bounds=(PRT_THETA_MIN, PRT_THETA_MAX))
 
-    # 3. Construct ROI from PRT estimate
-    roi = build_roi(R_prt, theta_prt, tau_prt)
-
-    # 4. Exact spherical-wave HRT inside ROI
-    R_hat, theta_hat, tau_hat, peak = run_hrt(mf_rx, time_axis, antenna_x, roi)
-
-    # 5. Polar -> Cartesian
+    R_hat, theta_hat, tau_hat, hrt_peak = run_hrt(mf_rx, time_axis, antenna_x, roi)
     x_hat, y_hat = polar_to_xy(R_hat, theta_hat)
 
-    return LocalizationResult(
-        R=R_hat, theta=theta_hat, tau=tau_hat, x=x_hat, y=y_hat,
-        prt_R=R_prt, prt_theta=theta_prt, prt_tau=tau_prt,
-        roi=roi, hrt_peak=peak
-    )
+    return LocalizationResult(R_hat, theta_hat, tau_hat, x_hat, y_hat,
+                              R_prt, theta_prt, tau_prt, roi, prt_peak, hrt_peak)
