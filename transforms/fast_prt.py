@@ -23,8 +23,8 @@ def run_parabolic_radon_transform(input_matrix, tx_xpos, ts, f0, px, qx, cpo):
     Q_flat = Q.ravel()
     n_spatial = len(P_flat)
 
-    # tau matrix (Nx x n_spatial) with each entry as tau = -px - qx^2
-    tau_matrix = -cp.outer(tx_gpu, P_flat) - cp.outer(tx_gpu**2, Q_flat)
+    # tau matrix (Nx x n_spatial) with each entry as tau = px + qx^2
+    tau_matrix = cp.outer(tx_gpu, P_flat) + cp.outer(tx_gpu**2, Q_flat)
 
     # pad for circular
     nt_original = d_gpu.shape[1]
@@ -46,27 +46,22 @@ def run_parabolic_radon_transform(input_matrix, tx_xpos, ts, f0, px, qx, cpo):
     freqs = cp.fft.fftfreq(nt, d=ts)
 
     # carrier freq offset pre-calculated using above
-    if cpo:
-        carrier_corr = cp.exp(1j * 2 * cp.pi * f0 * tau_matrix)
-    else:
-        carrier_corr = cp.ones_like(tau_matrix, dtype=cp.complex64)
+    scale_matrix = (2.0 * cp.pi) * tau_matrix
 
     # pre-divide by Nx to avoid division at every iteration of loop
-    antenna_weight_matrix = carrier_corr / Nx
+    inv_Nx = cp.float32(1.0 / Nx)
 
     # pre-allocate output on GPU
     U_f_flat = cp.zeros((nt, n_spatial), dtype=cp.complex64)
 
     # compute RT freq slice by freq slice
     for it in range(nt):
-        # time_corr: (Nx, n_spatial)
-        time_corr = cp.exp(1j * 2 * cp.pi * freqs[it] * tau_matrix)
-
         # combine time shift and CPO
-        total_corr = time_corr * antenna_weight_matrix
+        f_total = f0 + freqs[it] if cpo else freqs[it]
+        total_corr = cp.exp(1j * f_total * scale_matrix)
 
         # matrix multiplication -> sum over the antennas for all slownesses and hardware done on GPU very quickly
-        U_f_flat[it, :] = total_corr.T @ D_f[:, it]
+        U_f_flat[it, :] = (D_f[:, it] @ total_corr) * inv_Nx
     
     # reshape and IFFT along freq axis get back to time domain
     U_f = U_f_flat.reshape(nt, len(px), len(qx))
