@@ -246,5 +246,5 @@ pip install numpy scipy matplotlib tqdm
 
 Required for fast transform:
 ```bash
-pip install cupy
+pip install cupy-cuda11x
 ```
