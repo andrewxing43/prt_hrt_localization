@@ -243,3 +243,8 @@ Required packages:
 ```bash
 pip install numpy scipy matplotlib tqdm
 ```
+
+Required for fast transform:
+```bash
+pip install cupy
+```
