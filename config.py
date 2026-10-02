@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
-
-C = 299_792_458.0
+from scipy.constants import speed_of_light as C
 
 
 @dataclass(frozen=True)
