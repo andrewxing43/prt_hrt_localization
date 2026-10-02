@@ -3,7 +3,7 @@ from scipy.integrate import quad
 from scipy.optimize import root_scalar
 from scipy.constants import speed_of_light as c
 from localization.roi import ROI
-from localization.parameter_mapping import p_to_theta, pq_to_range
+from localization.parameter_mapping import p_to_theta_deg, pq_to_range
 
 def sinc_derivatives(u):
     """
@@ -24,21 +24,32 @@ def sinc_derivatives(u):
         spp = -(np.pi**2) * s - 2.0 * sp / u
     return s, sp, spp
 
+def gaussian_derivatives(u):
+    """
+    Get first second and third derivatives of the Gaussian pulse
+
+    Use normalized gaussian autocorrelation (post MF) as the "pulse" to differentiate
+    """
+    s = np.exp(-0.5 * np.pi**2 * u**2)
+    sp = -np.pi**2 * u * s
+    spp = (np.pi**4 * u**2 - np.pi**2) * s
+    return s, sp, spp
+
 def finite_bw_bifurcation_equation(gamma, rho):
     """
     find A, A', and A'' to evaluate G' wrt beta at w = 0, beta = 0
     """
     def integrand_A(y):
-        s, _, _ = sinc_derivatives(rho * gamma * y)
+        s, _, _ = gaussian_derivatives(rho * gamma * y)
         phase = 2 * np.pi * gamma * y
         return s * np.exp(1j * phase)
         
     def integrand_A_b(y):
-        s, sp, _ = sinc_derivatives(rho * gamma * y)
+        s, sp, _ = gaussian_derivatives(rho * gamma * y)
         return (y**2) * (rho * sp + 1j * 2 * np.pi * s) * np.exp(1j * 2 * np.pi * gamma * y)
         
     def integrand_A_bb(y):
-        s, sp, spp = sinc_derivatives(rho * gamma * y)
+        s, sp, spp = gaussian_derivatives(rho * gamma * y)
         return (y**4) * (rho**2 * spp + 1j * 4 * np.pi * rho * sp - 4 * np.pi**2 * s) * np.exp(1j * 2 * np.pi * gamma * y)
 
     def complex_quad(func, a, b):
@@ -83,18 +94,18 @@ def eval_G_derivatives(w, gamma, beta, rho):
     Find A, A', and A'' to evaluate G' wrt beta at beta = 0
     """
     def integrand_A(y):
-        s, _, _ = sinc_derivatives(w + rho * (gamma * y + beta * y**2))
+        s, _, _ = gaussian_derivatives(w + rho * (gamma * y + beta * y**2))
         phase = 2 * np.pi * (gamma * y + beta * y**2)
         return s * np.exp(1j * phase)
         
     def integrand_A_b(y):
-        s, sp, _ = sinc_derivatives(w + rho * (gamma * y + beta * y**2))
+        s, sp, _ = gaussian_derivatives(w + rho * (gamma * y + beta * y**2))
         phase = 2 * np.pi * (gamma * y + beta * y**2)
         term = rho * sp + 1j * 2 * np.pi * s
         return (y**2) * term * np.exp(1j * phase)
         
     def integrand_A_bb(y):
-        s, sp, spp = sinc_derivatives(w + rho * (gamma * y + beta * y**2))
+        s, sp, spp = gaussian_derivatives(w + rho * (gamma * y + beta * y**2))
         phase = 2 * np.pi * (gamma * y + beta * y**2)
         term = rho**2 * spp + 1j * 4 * np.pi * rho * sp - 4 * np.pi**2 * s
         return (y**4) * term * np.exp(1j * phase)
@@ -150,75 +161,94 @@ def solve_beta_star(w_val, g_val, rho, guess=0.0, initial_step=0.05, max_radius=
 
     return guess, np.nan, False
 
-
-def get_roi(L, f0, B, Np, p_peak, q_peak, tau_peak, oversampling=2.0):
+def get_error_margins(L, f0, B, Np, oversampling=2.0, n_grid=21):
     """
-    Establish maximum q displacement given the maximum p and tau errors to narrow HRT
-    Return as an ROI object centered around the detected PRT argmax
+    Get the numerical error bound on E_q before running any RTs
+    Since this is source independent, it can be done offline based solely off dp/dt
+    The dq/2 allowance assumes selection of a nearest q bin.
     """
     # system parameters
     rho = B / f0
 
     # time quantization + error based on oversampling rate
-    w_max = 1/(2*oversampling)
-    dt = 1 / (oversampling * 2 * B)
-
-    # slowness grid (Np from w=0 case is 306)
+    dt = 1.0 / (oversampling * B)
+    w_max = B * dt / 2.0
+    
+    # slowness grid
     dp = (2.0 / c) / (Np - 1)
     gamma_max = f0 * L * dp / 2.0
 
-    # search only the worst case tau/p errors
-    corners = [
-        (w_max, gamma_max),
-        (w_max, -gamma_max),
-        (-w_max, gamma_max),
-        (-w_max, -gamma_max)
-    ]
-    
+    # get the worst case E_q
+    w_values = np.linspace(-w_max, w_max, n_grid)
+    gamma_values = np.linspace(-gamma_max, gamma_max, n_grid)
     max_beta_shift = 0.0
 
     # solve over different combinations of of omega/gamma
-    for w_val, g_val in corners:
-        # start near the previous guess B_star 
-        # the peak hopefully shouldnt move much between diff values of omega >= 0
-        b_opt, gbb_opt, success = solve_beta_star(w_val, g_val, rho, guess=0.0)
-        
-        if success and gbb_opt < 0:
+    for w_val in w_values:
+        for g_val in gamma_values:
+
+            # start w/guess of no error (beta = 0)
+            b_opt, gbb_opt, success = solve_beta_star(w_val, g_val, rho, guess=0.0)
+            if not success or not np.isfinite(gbb_opt) or gbb_opt >= 0:
+                raise RuntimeError(f"No resolved local maximum at w={w_val}, gamma={g_val}; refine Np or inspect the beta search")
+            
+            # largest beta (peak) displacement observed in our grid
             max_beta_shift = max(max_beta_shift, abs(b_opt))
 
-    # largest beta (peak) displacement observed in our grid
-    E_beta = max_beta_shift
-
     # largest q displacement observed in the grid
-    E_q = E_beta / (f0 * L**2)
+    # NOT YET accounting for dq grid
+    E_q_cont = max_beta_shift / (f0 * L**2) 
+    return E_q_cont, dp, dt
 
+
+def get_roi(p_peak, q_peak, tau_peak, dp, E_q, dt, range_bounds=None, theta_bounds=None):
+    """
+    Given the maximum p and tau errors to narrow HRT, we can find maximum q displacement
+    Return as R/theta/tau deta, i.e. an ROI object centered around the detected PRT argmax
+    """
     p_min_bound = p_peak - (dp/2.0)
     p_max_bound = p_peak + (dp/2.0)
 
     # convert p bounds to theta bounds for HRT
-    theta_1 = p_to_theta(p_min_bound)
-    theta_2 = p_to_theta(p_max_bound)
-    
-    theta_min = min(theta_1, theta_2)
-    theta_max = max(theta_1, theta_2)
+    theta_1 = p_to_theta_deg(p_min_bound)
+    theta_2 = p_to_theta_deg(p_max_bound)
+
+    # order correctly and clip to theta_bounds
+    theta_min_calc = min(theta_1, theta_2)
+    theta_max_calc = max(theta_1, theta_2)
+
+    if theta_bounds is not None:
+        theta_min = max(theta_min_calc, theta_bounds[0])
+        theta_max = min(theta_max_calc, theta_bounds[1])
+    else:
+        theta_min = theta_min_calc
+        theta_max = theta_max_calc
 
     # get q bounds
     q_min_bound = q_peak - E_q
     q_max_bound = q_peak + E_q
     
     # handle far-field/negative q edge cases
-    if q_min_bound <= 0:
-        R_max = float('inf')
+    if q_min_bound <= 1e-12:
+        R_max_calc = float('inf')
     else:
-        R_max = pq_to_range(p_peak, q_min_bound)
+        R_max_calc = pq_to_range(p_peak, q_min_bound)
         
-    if q_max_bound <= 0:
-        R_min = 0.0
+    if q_max_bound <= 1e-12:
+        R_min_calc = 0.0
     else:
-        R_min = pq_to_range(p_peak, q_max_bound)
+        R_min_calc = pq_to_range(p_peak, q_max_bound)
         
-    if R_min > R_max:
-        R_min, R_max = R_max, R_min
+    if R_min_calc > R_max_calc:
+        R_min_calc, R_max_calc = R_max_calc, R_min_calc
+    
+    # clip to range_bounds
+    if range_bounds is not None:
+        R_min = max(R_min_calc, range_bounds[0])
+        R_max = min(R_max_calc, range_bounds[1])
+    else:
+        R_min = R_min_calc
+        R_max = R_max_calc
 
     # tau bounds based off time bin
     tau_min = tau_peak - (dt/2.0)
