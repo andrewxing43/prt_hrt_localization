@@ -51,15 +51,7 @@ def shared_prt_peak(mf_rx, time_axis, antenna_x, px, qx, f0):
     ranges = pq_to_range(P, Q)
     angles = p_to_theta_deg(P)
 
-    # make sure some ranges/angles are inside our bounds
-    valid = np.isfinite(ranges) & (ranges >= PRT_R_MIN) & (ranges <= PRT_R_MAX) & \
-            (angles >= PRT_THETA_MIN) & (angles <= PRT_THETA_MAX)
-    
-    if not np.any(valid):
-        raise ValueError("No physically valid PRT candidates in the grid")
-
-    # find argmax peak and return
-    score = np.where(valid[None, :, :], np.abs(prt)**2, -np.inf)
+    score = np.abs(prt)**2
     idx = np.unravel_index(np.argmax(score), score.shape)
 
     return float(px[idx[1]]), float(qx[idx[2]]), float(time_axis[idx[0]])
@@ -82,16 +74,9 @@ def shared_prt_peak_hints(mf_rx, time_axis, antenna_x, px, qx, f0, theta_hint, t
     ranges = pq_to_range(P, Q)
     angles = p_to_theta_deg(P)
 
-    # make candidates are valid
-    valid = np.isfinite(ranges) & (ranges >= PRT_R_MIN) & (ranges <= PRT_R_MAX) & (angles >= PRT_THETA_MIN) & (angles <= PRT_THETA_MAX)
-    if not np.any(valid):
-        raise ValueError("No physically valid PRT candidates in the hinted grid")
-
-    # find the peak near the hinted grid
-    score = np.where(valid[None, :, :], np.abs(prt[tau_idx])**2, -np.inf)
+    score = np.abs(prt[tau_idx])**2
     idx = np.unravel_index(np.argmax(score), score.shape)
 
-    # return winning tau/p/q
     return float(p_grid[idx[1]]), float(qx[idx[2]]), float(time_axis[tau_idx[idx[0]]])
 
 # find HRT peak using fast transform using either ROI object
