@@ -173,7 +173,7 @@ def get_error_margins(L, f0, B, Np, oversampling=2.0, n_grid=21):
     # time quantization + error based on oversampling rate
     dt = 1.0 / (oversampling * B)
     w_max = B * dt / 2.0
-    
+
     # slowness grid
     dp = (2.0 / c) / (Np - 1)
     gamma_max = f0 * L * dp / 2.0
@@ -200,14 +200,31 @@ def get_error_margins(L, f0, B, Np, oversampling=2.0, n_grid=21):
     E_q_cont = max_beta_shift / (f0 * L**2) 
     return E_q_cont, dp, dt
 
+def get_p_cell_bounds(p_peak, p_grid, theta_bounds=None):
+    """
+    Get the nearest-node cell of p_peak on the p grid
+    """
+    p_sorted = np.sort(p_grid)
+    peak_idx = int(np.argmin(np.abs(p_sorted - p_peak)))
 
-def get_roi(p_peak, q_peak, tau_peak, dp, E_q, dt, range_bounds=None, theta_bounds=None):
+    p_min_bound = p_sorted[0] if peak_idx == 0 else 0.5 * (p_sorted[peak_idx - 1] + p_sorted[peak_idx])
+    p_max_bound = p_sorted[-1] if peak_idx == len(p_sorted) - 1 else 0.5 * (p_sorted[peak_idx] + p_sorted[peak_idx + 1])
+
+    if theta_bounds is not None:
+        theta_p = -np.sin(np.deg2rad(np.asarray(theta_bounds, dtype=float))) / c
+        p_min_bound = max(p_min_bound, float(np.min(theta_p)))
+        p_max_bound = min(p_max_bound, float(np.max(theta_p)))
+
+
+    return float(p_min_bound), float(p_max_bound)
+
+
+def get_roi(p_peak, q_peak, tau_peak, p_grid, E_q, dt, range_bounds=None, theta_bounds=None):
     """
     Given the maximum p and tau errors to narrow HRT, we can find maximum q displacement
     Return as R/theta/tau deta, i.e. an ROI object centered around the detected PRT argmax
     """
-    p_min_bound = p_peak - (dp/2.0)
-    p_max_bound = p_peak + (dp/2.0)
+    p_min_bound, p_max_bound = get_p_cell_bounds(p_peak, p_grid, theta_bounds=theta_bounds)
 
     # convert p bounds to theta bounds for HRT
     theta_1 = p_to_theta_deg(p_min_bound)
@@ -228,16 +245,22 @@ def get_roi(p_peak, q_peak, tau_peak, dp, E_q, dt, range_bounds=None, theta_boun
     q_min_bound = q_peak - E_q
     q_max_bound = q_peak + E_q
     
+    # we want to check all p values that can produce the max or min range over that interval
+    # if the interval crosses 0, p = 0 should be included
+    p_candidates = np.array([p_min_bound, p_max_bound])
+    if p_min_bound <= 0.0 <= p_max_bound:
+        p_candidates = np.append(p_candidates, 0.0)
+
     # handle far-field/negative q edge cases
     if q_min_bound <= 1e-12:
         R_max_calc = float('inf')
     else:
-        R_max_calc = pq_to_range(p_peak, q_min_bound)
+        R_max_calc = float(np.max(pq_to_range(p_candidates, q_min_bound)))
         
     if q_max_bound <= 1e-12:
         R_min_calc = 0.0
     else:
-        R_min_calc = pq_to_range(p_peak, q_max_bound)
+        R_min_calc = float(np.min(pq_to_range(p_candidates, q_max_bound)))
         
     if R_min_calc > R_max_calc:
         R_min_calc, R_max_calc = R_max_calc, R_min_calc
