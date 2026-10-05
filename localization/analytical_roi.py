@@ -161,21 +161,25 @@ def solve_beta_star(w_val, g_val, rho, guess=0.0, initial_step=0.05, max_radius=
 
     return guess, np.nan, False
 
-def get_error_margins(L, f0, B, Np, oversampling=2.0, n_grid=21):
+def get_error_margins(L, f0, B, p_grid, dt, n_grid=21):
     """
     Get the numerical error bound on E_q before running any RTs
-    Since this is source independent, it can be done offline based solely off dp/dt
-    The dq/2 allowance assumes selection of a nearest q bin.
+    Since this is source independent, it can be done offline based solely off the p grid/dt
+    The p grid allowance assumes selection of a nearest q bin
+    Can be used for unevenly spaced p grids
     """
+
+    # get all dps in case grid is unevenly spaced
+    differences = np.diff(p_grid)
+    dp = float(np.max(np.abs(differences)))
+
     # system parameters
     rho = B / f0
 
-    # time quantization + error based on oversampling rate
-    dt = 1.0 / (oversampling * B)
+    # time error based on BW and dt
     w_max = B * dt / 2.0
 
-    # slowness grid
-    dp = (2.0 / c) / (Np - 1)
+    # slowness grid errors
     gamma_max = f0 * L * dp / 2.0
 
     # get the worst case E_q
@@ -183,21 +187,22 @@ def get_error_margins(L, f0, B, Np, oversampling=2.0, n_grid=21):
     gamma_values = np.linspace(-gamma_max, gamma_max, n_grid)
     max_beta_shift = 0.0
 
-    # solve over different combinations of of omega/gamma
+    # solve over different combinations of omega/gamma
     for w_val in w_values:
-        for g_val in gamma_values:
-
+        for gamma_val in gamma_values:
             # start w/guess of no error (beta = 0)
-            b_opt, gbb_opt, success = solve_beta_star(w_val, g_val, rho, guess=0.0)
-            if not success or not np.isfinite(gbb_opt) or gbb_opt >= 0:
-                raise RuntimeError(f"No resolved local maximum at w={w_val}, gamma={g_val}; refine Np or inspect the beta search")
+            beta_opt, gbb_opt, success = solve_beta_star(w_val, gamma_val, rho, guess=0.0)
+
+            if not success or not np.isfinite(beta_opt) or not np.isfinite(gbb_opt) or gbb_opt >= 0:
+                raise RuntimeError(f"No resolved local maximum at w={w_val}, gamma={gamma_val}")
             
             # largest beta (peak) displacement observed in our grid
-            max_beta_shift = max(max_beta_shift, abs(b_opt))
+            max_beta_shift = max(max_beta_shift, abs(beta_opt))
 
     # largest q displacement observed in the grid
     # NOT YET accounting for dq grid
-    E_q_cont = max_beta_shift / (f0 * L**2) 
+    E_q_cont = max_beta_shift / (f0 * L**2)
+
     return E_q_cont, dp, dt
 
 def get_p_cell_bounds(p_peak, p_grid, theta_bounds=None):
