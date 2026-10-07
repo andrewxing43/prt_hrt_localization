@@ -7,14 +7,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from config import C, SYSTEM, ARRAY, PRT
+from config import C, SYSTEM, ARRAY, SIM, PRT
 from signal_model.propagation import propagation_delays, received_signal
 from signal_model.noise import add_awgn
 from signal_model.matched_filter import matched_filter
 from transforms.prt import parabolic_radon_transform
 from localization.parameter_mapping import range_theta_to_pq, pq_to_range, p_to_theta_deg
 
-SNR_DB = 10.0
 N_POSITIONS = 50
 
 R_MIN, R_MAX = 50.0, 400.0
@@ -89,7 +88,8 @@ def main():
 
     records = []
 
-    print(f"Positions={N_POSITIONS}, SNR={SNR_DB:.1f} dB, K={K}, Delta q={DQ:.1e}")
+    print(f"Positions={N_POSITIONS}, K={K}, Delta q={DQ:.1e}")
+    print(f"Tx power={SIM.tx_power_dbm:.3f} dBm, thermal noise={10*np.log10(SIM.noise_power/1e-3):.3f} dBm")
 
     for _ in tqdm(range(N_POSITIONS), desc="Validating ROI", unit="pos"):
         R_true = rng_pos.uniform(R_MIN, R_MAX)
@@ -105,7 +105,7 @@ def main():
         time_axis = build_time_axis(R_true, theta_true, antenna_x)
         clean_rx, _ = received_signal(time_axis, R_true, theta_true, antenna_x=antenna_x)
 
-        noisy_rx, _ = add_awgn(clean_rx, snr_db=SNR_DB, rng=rng_noise)
+        noisy_rx, _ = add_awgn(clean_rx, rng=rng_noise)
         mf_rx = matched_filter(noisy_rx)
 
         prt = parabolic_radon_transform(mf_rx, antenna_x, p_local, q_local)

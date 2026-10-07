@@ -31,7 +31,6 @@ from transforms.hrt import hyperbolic_radon_transform, hrt_peak
 # Experiment settings
 # ============================================================
 
-SNR_DB = SIM.snr_db
 N_POSITIONS = 250
 
 R_MIN, R_MAX = 50.0, 400.0
@@ -41,7 +40,7 @@ CLOCK_OFFSET = 10e-9
 
 HRT_DR = 1
 HRT_DTHETA = PRT.theta_step_deg
-HRT_DTAU = SYSTEM.dt/4
+HRT_DTAU = SYSTEM.dt / 4
 
 R_HALF_WIDTH = 50.0
 THETA_HALF_WIDTH = 0.2
@@ -112,7 +111,9 @@ def main():
     print("HRT ACCURACY EXPERIMENT")
     print("=" * 80)
     print(f"Positions        : {N_POSITIONS}")
-    print(f"SNR              : {SNR_DB:.1f} dB")
+    print(f"Tx power         : {SIM.tx_power_dbm:.3f} dBm")
+    print(f"Thermal noise    : {10.0 * np.log10(SIM.noise_power / 1e-3):.3f} dBm")
+    print(f"Reference SNR    : {SIM.reference_snr_db:.1f} dB at {SIM.reference_range:.1f} m")
     print(f"R resolution     : {HRT_DR:.3f} m")
     print(f"theta resolution : {HRT_DTHETA:.3f} deg")
     print(f"tau resolution   : {HRT_DTAU * 1e12:.6f} ps")
@@ -133,7 +134,7 @@ def main():
             clock_offset=CLOCK_OFFSET,
             antenna_x=antenna_x,
         )
-        noisy_rx, _ = add_awgn(clean_rx, snr_db=SNR_DB, rng=rng_noise)
+        noisy_rx, _ = add_awgn(clean_rx, rng=rng_noise)
         mf_rx = matched_filter(noisy_rx)
 
         range_grid = local_grid(R_GLOBAL, R_true, R_HALF_WIDTH)

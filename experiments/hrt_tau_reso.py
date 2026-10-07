@@ -35,7 +35,6 @@ from transforms.hrt import hyperbolic_radon_transform, hrt_peak
 R_TRUE = 200.37
 THETA_TRUE = 30.03
 CLOCK_OFFSET = 10e-9
-SNR_DB = SIM.snr_db
 
 N_MC = 100
 
@@ -92,6 +91,7 @@ def main():
     rng = np.random.default_rng(SIM.rng_seed)
 
     tau_true = R_TRUE / C + CLOCK_OFFSET
+    snr_db = SIM.reference_snr_db + 20.0 * np.log10(SIM.reference_range / R_TRUE)
 
     time_axis = build_time_axis(R_TRUE, THETA_TRUE, CLOCK_OFFSET, antenna_x)
     clean_rx, _ = received_signal(time_axis, R_TRUE, THETA_TRUE, clock_offset=CLOCK_OFFSET, antenna_x=antenna_x)
@@ -121,7 +121,9 @@ def main():
     print(f"R_true          : {R_TRUE:.6f} m")
     print(f"theta_true      : {THETA_TRUE:.6f} deg")
     print(f"tau_true        : {tau_true * 1e9:.6f} ns")
-    print(f"SNR             : {SNR_DB:.1f} dB")
+    print(f"SNR             : {snr_db:.1f} dB")
+    print(f"Tx power        : {SIM.tx_power_dbm:.3f} dBm")
+    print(f"Thermal noise   : {10.0 * np.log10(SIM.noise_power / 1e-3):.3f} dBm")
     print(f"Monte Carlo     : {N_MC}")
     print(f"R step          : {HRT_DR:.3f} m")
     print(f"theta step      : {HRT_DTHETA:.3f} deg")
@@ -132,7 +134,7 @@ def main():
     progress = tqdm(range(N_MC), desc="Monte Carlo", unit="trial")
 
     for _ in progress:
-        noisy_rx, _ = add_awgn(clean_rx, snr_db=SNR_DB, rng=rng)
+        noisy_rx, _ = add_awgn(clean_rx, rng=rng)
         mf_rx = matched_filter(noisy_rx)
 
         for divisor in TAU_DIVISORS:

@@ -1,11 +1,12 @@
 """
-250-run Monte Carlo test for PRT -> ROI -> HRT pipeline.
+500-run Monte Carlo test for PRT -> ROI -> HRT pipeline.
 
 Each run:
 - Random off-grid user
 - R ~ U(50, 400) m
 - theta ~ U(-60, 60) deg
-- SNR = 10 dB
+- Physical free-space path loss
+- Thermal AWGN with fixed kTB
 - Run current truth-assisted pipeline
 - Record final 2-D localization error
 
@@ -35,7 +36,6 @@ from localization.pipeline import localize
 N_MC = 500
 R_MIN, R_MAX = 50.0, 400.0
 THETA_MIN, THETA_MAX = -60.0, 60.0
-SNR_DB = 10.0
 CLOCK_OFFSET = 10e-9
 
 
@@ -52,6 +52,10 @@ def polar_to_xy(R, theta_deg):
     return R * np.sin(t), R * np.cos(t)
 
 
+def snr_db_at_range(R):
+    return SIM.reference_snr_db + 20.0 * np.log10(SIM.reference_range / R)
+
+
 def draw_user_region(ax, rmin=R_MIN, rmax=R_MAX, thmin=THETA_MIN, thmax=THETA_MAX):
     th = np.deg2rad(np.linspace(thmin, thmax, 600))
     for r, lw, ls, a in [(rmin, 1.5, "--", 0.9), (rmax, 2.0, "-", 1.0)]:
@@ -66,7 +70,7 @@ def draw_user_region(ax, rmin=R_MIN, rmax=R_MAX, thmin=THETA_MIN, thmax=THETA_MA
         ax.plot(r * np.sin(th), r * np.cos(th), color="gray", lw=0.8, ls=":", alpha=0.5)
 
     ax.text(rmax * np.sin(np.deg2rad(thmin)) - 18, rmax * np.cos(np.deg2rad(thmin)) - 5, f"{thmin:.0f}°", fontsize=10)
-    ax.text(rmax * np.sin(np.deg2rad(thmax)) + 4,  rmax * np.cos(np.deg2rad(thmax)) - 5, f"{thmax:.0f}°", fontsize=10)
+    ax.text(rmax * np.sin(np.deg2rad(thmax)) + 4, rmax * np.cos(np.deg2rad(thmax)) - 5, f"{thmax:.0f}°", fontsize=10)
     ax.text(0, rmax + 8, "0°", ha="center", fontsize=10)
     ax.text(8, rmin + 2, f"R={int(rmin)} m", fontsize=9)
     ax.text(8, rmax - 8, f"R={int(rmax)} m", fontsize=9)
@@ -78,6 +82,7 @@ def main():
     rng_noise = np.random.default_rng(SIM.rng_seed + 1)
 
     errors = np.zeros(N_MC)
+    snrs = np.zeros(N_MC)
     x_true_all = np.zeros(N_MC)
     y_true_all = np.zeros(N_MC)
 
@@ -89,23 +94,25 @@ def main():
 
         time_axis = build_time_axis(R_true, theta_true, CLOCK_OFFSET, antenna_x)
         clean_rx, _ = received_signal(time_axis, R_true, theta_true, clock_offset=CLOCK_OFFSET, antenna_x=antenna_x)
-        noisy_rx, _ = add_awgn(clean_rx, snr_db=SNR_DB, rng=rng_noise)
+        noisy_rx, _ = add_awgn(clean_rx, rng=rng_noise)
 
         result = localize(noisy_rx, time_axis, antenna_x, theta_true, tau_true)
 
         x_true_all[i], y_true_all[i] = x_true, y_true
         errors[i] = np.hypot(result.x - x_true, result.y - y_true)
+        snrs[i] = snr_db_at_range(R_true)
 
     ALE = np.mean(errors)
     RMSE = np.sqrt(np.mean(errors**2))
 
     print("\n" + "=" * 50)
-    print(f"N    : {N_MC}")
-    print(f"ALE  : {ALE:.6f} m")
-    print(f"RMSE : {RMSE:.6f} m")
+    print(f"N        : {N_MC}")
+    print(f"Tx power : {SIM.tx_power_dbm:.3f} dBm")
+    print(f"SNR range: {snrs.min():.3f} to {snrs.max():.3f} dB")
+    print(f"ALE      : {ALE:.6f} m")
+    print(f"RMSE     : {RMSE:.6f} m")
     print("=" * 50)
 
-    # CDF
     x = np.sort(errors)
     y = np.arange(1, N_MC + 1) / N_MC
 
@@ -117,7 +124,6 @@ def main():
     plt.grid(True)
     plt.tight_layout()
 
-    # Position-error map
     fig, ax = plt.subplots(figsize=(8.6, 8.2))
     sc = ax.scatter(x_true_all, y_true_all, c=errors, s=42, cmap="turbo", edgecolors="k", linewidths=0.25)
     draw_user_region(ax)
