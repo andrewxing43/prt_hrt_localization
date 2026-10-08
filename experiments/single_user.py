@@ -33,7 +33,7 @@ from signal_model.noise import add_awgn
 from localization.pipeline import localize
 
 
-N_MC = 500
+N_MC = 250
 R_MIN, R_MAX = 50.0, 400.0
 THETA_MIN, THETA_MAX = -60.0, 60.0
 CLOCK_OFFSET = 10e-9

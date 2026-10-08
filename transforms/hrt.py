@@ -1,9 +1,34 @@
+"""
+GPU-accelerated Hyperbolic Radon Transform using CuPy.
+
+Public API preserved:
+    relative_spherical_delays(...)
+    tau_from_clock_offset(...)
+    clock_offset_from_tau(...)
+    hyperbolic_radon_transform(...)
+    hrt_peak(...)
+
+The HRT calculation runs on an NVIDIA GPU. Results are converted back
+to numpy.ndarray for compatibility with the existing project.
+"""
+
 import numpy as np
+import cupy as cp
+
 from config import C, SYSTEM
 
 
+# ============================================================
+# Public geometry helpers
+# ============================================================
+
 def relative_spherical_delays(range_m, theta_deg, antenna_x):
-    """Exact spherical-wave delays relative to the array-center arrival time."""
+    """
+    Exact spherical-wave delays relative to the array-center arrival time.
+
+    This public helper remains NumPy-based to preserve its original behavior
+    and return type.
+    """
     antenna_x = np.asarray(antenna_x, dtype=float)
     R = np.asarray(range_m, dtype=float)
     theta = np.deg2rad(np.asarray(theta_deg, dtype=float))
@@ -18,28 +43,78 @@ def relative_spherical_delays(range_m, theta_deg, antenna_x):
     theta = theta.ravel()
 
     x = antenna_x[:, None]
-    d = np.sqrt(R[None, :]**2 + x**2 - 2.0 * R[None, :] * x * np.sin(theta)[None, :])
+    distance = np.sqrt(
+        R[None, :]**2
+        + x**2
+        - 2.0 * R[None, :] * x * np.sin(theta)[None, :]
+    )
 
-    return (d - R[None, :]) / C
+    return (distance - R[None, :]) / C
 
 
 def tau_from_clock_offset(range_m, clock_offset=0.0):
     """Reference arrival time: tau = R/c + user/device delay."""
-    tau = np.asarray(range_m, dtype=float) / C + np.asarray(clock_offset, dtype=float)
+    tau = np.asarray(range_m, dtype=float) / C + np.asarray(
+        clock_offset,
+        dtype=float,
+    )
     return float(tau) if tau.ndim == 0 else tau
 
 
 def clock_offset_from_tau(tau, range_m):
     """Recover user/device delay: b = tau - R/c."""
-    offset = np.asarray(tau, dtype=float) - np.asarray(range_m, dtype=float) / C
+    offset = np.asarray(tau, dtype=float) - np.asarray(
+        range_m,
+        dtype=float,
+    ) / C
     return float(offset) if offset.ndim == 0 else offset
 
 
-def hyperbolic_radon_transform(data, time_axis, antenna_x, range_grid, theta_grid,
-                               tau_grid, fc=SYSTEM.fc, carrier_phase_correction=True,
-                               batch_size=128):
+# ============================================================
+# Internal GPU geometry helper
+# ============================================================
+
+def _relative_spherical_delays_gpu(
+    range_m_gpu,
+    theta_deg_gpu,
+    antenna_x_gpu,
+):
+    """GPU version used internally by the HRT."""
+    R = cp.asarray(range_m_gpu, dtype=cp.float64)
+    theta = cp.deg2rad(cp.asarray(theta_deg_gpu, dtype=cp.float64))
+
+    R, theta = cp.broadcast_arrays(R, theta)
+    R = R.ravel()
+    theta = theta.ravel()
+
+    x = antenna_x_gpu[:, None]
+    distance_squared = (
+        R[None, :]**2
+        + x**2
+        - 2.0 * R[None, :] * x * cp.sin(theta)[None, :]
+    )
+
+    distance = cp.sqrt(cp.maximum(distance_squared, 0.0))
+    return (distance - R[None, :]) / C
+
+
+# ============================================================
+# GPU HRT
+# ============================================================
+
+def hyperbolic_radon_transform(
+    data,
+    time_axis,
+    antenna_x,
+    range_grid,
+    theta_grid,
+    tau_grid,
+    fc=SYSTEM.fc,
+    carrier_phase_correction=True,
+    batch_size=128,
+):
     """
-    Exact spherical-wave HRT.
+    GPU-accelerated exact spherical-wave HRT.
 
     Output shape:
         (N_tau, N_range, N_theta)
@@ -48,7 +123,31 @@ def hyperbolic_radon_transform(data, time_axis, antenna_x, range_grid, theta_gri
         d_m = sqrt(R^2 + x_m^2 - 2 R x_m sin(theta))
         t_m = tau + (d_m - R) / c
 
-    tau is independent of R, so an unknown user/device delay is supported.
+    Parameters
+    ----------
+    data : ndarray, shape (num_antennas, num_time_samples)
+        Complex matched-filtered array data.
+    time_axis : ndarray
+        Uniformly sampled time axis.
+    antenna_x : ndarray
+        Antenna positions [m].
+    range_grid : ndarray
+        Candidate ranges [m].
+    theta_grid : ndarray
+        Candidate angles [deg].
+    tau_grid : ndarray
+        Candidate reference arrival times [s].
+    fc : float
+        Carrier frequency [Hz].
+    carrier_phase_correction : bool
+        Apply carrier phase compensation when True.
+    batch_size : int
+        Number of (range, theta) candidates processed per GPU batch.
+
+    Returns
+    -------
+    hrt : numpy.ndarray
+        Complex HRT with shape (N_tau, N_range, N_theta).
     """
     data = np.asarray(data, dtype=np.complex128)
     time_axis = np.asarray(time_axis, dtype=float)
@@ -58,66 +157,158 @@ def hyperbolic_radon_transform(data, time_axis, antenna_x, range_grid, theta_gri
     tau_grid = np.asarray(tau_grid, dtype=float)
 
     if data.ndim != 2:
-        raise ValueError("data must have shape (num_antennas, num_time_samples)")
+        raise ValueError(
+            "data must have shape (num_antennas, num_time_samples)"
+        )
     if time_axis.ndim != 1 or time_axis.size != data.shape[1]:
-        raise ValueError("time_axis must match the time dimension of data")
+        raise ValueError(
+            "time_axis must match the time dimension of data"
+        )
     if antenna_x.ndim != 1 or antenna_x.size != data.shape[0]:
-        raise ValueError("antenna_x must match the antenna dimension of data")
-    if range_grid.ndim != 1 or range_grid.size == 0 or np.any(range_grid <= 0):
-        raise ValueError("range_grid must be a non-empty positive 1-D array")
-    if theta_grid.ndim != 1 or theta_grid.size == 0:
-        raise ValueError("theta_grid must be a non-empty 1-D array")
-    if tau_grid.ndim != 1 or tau_grid.size == 0:
-        raise ValueError("tau_grid must be a non-empty 1-D array")
-    if batch_size < 1:
-        raise ValueError("batch_size must be >= 1")
+        raise ValueError(
+            "antenna_x must match the antenna dimension of data"
+        )
+    if (
+        range_grid.ndim != 1
+        or range_grid.size == 0
+        or np.any(~np.isfinite(range_grid))
+        or np.any(range_grid <= 0)
+    ):
+        raise ValueError(
+            "range_grid must be a non-empty positive finite 1-D array"
+        )
+    if (
+        theta_grid.ndim != 1
+        or theta_grid.size == 0
+        or np.any(~np.isfinite(theta_grid))
+    ):
+        raise ValueError(
+            "theta_grid must be a non-empty finite 1-D array"
+        )
+    if (
+        tau_grid.ndim != 1
+        or tau_grid.size == 0
+        or np.any(~np.isfinite(tau_grid))
+    ):
+        raise ValueError(
+            "tau_grid must be a non-empty finite 1-D array"
+        )
+    if not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
+        raise ValueError("batch_size must be an integer >= 1")
+    if not np.isfinite(fc):
+        raise ValueError("fc must be finite")
+    if cp.cuda.runtime.getDeviceCount() < 1:
+        raise RuntimeError("No CUDA-capable GPU was detected by CuPy.")
 
     dt_all = np.diff(time_axis)
     dt = float(np.mean(dt_all))
-    if dt <= 0 or not np.allclose(dt_all, dt, rtol=1e-8, atol=max(1e-18, abs(dt) * 1e-10)):
+
+    if (
+        dt <= 0
+        or not np.allclose(
+            dt_all,
+            dt,
+            rtol=1e-8,
+            atol=max(1e-18, abs(dt) * 1e-10),
+        )
+    ):
         raise ValueError("time_axis must be uniformly sampled")
 
-    nr, nt_theta, nt_tau = len(range_grid), len(theta_grid), len(tau_grid)
+    num_antennas, num_time_samples = data.shape
+    num_ranges = range_grid.size
+    num_angles = theta_grid.size
+    num_tau = tau_grid.size
 
-    R, theta = np.meshgrid(range_grid, theta_grid, indexing="ij")
-    R_flat = R.ravel()
-    theta_flat = theta.ravel()
+    data_gpu = cp.asarray(data)
+    antenna_x_gpu = cp.asarray(antenna_x)
+    range_grid_gpu = cp.asarray(range_grid)
+    theta_grid_gpu = cp.asarray(theta_grid)
+    tau_grid_gpu = cp.asarray(tau_grid)
 
-    n_candidates = len(R_flat)
-    out = np.zeros((nt_tau, n_candidates), dtype=np.complex128)
+    R_gpu, theta_gpu = cp.meshgrid(
+        range_grid_gpu,
+        theta_grid_gpu,
+        indexing="ij",
+    )
+    R_flat = R_gpu.ravel()
+    theta_flat = theta_gpu.ravel()
 
-    antenna_idx = np.arange(data.shape[0])[:, None, None]
+    num_candidates = int(R_flat.size)
+    output_gpu = cp.zeros(
+        (num_tau, num_candidates),
+        dtype=cp.complex128,
+    )
+
+    antenna_indices = cp.arange(
+        num_antennas,
+        dtype=cp.int64,
+    )[:, None, None]
+
     t0 = float(time_axis[0])
-    nt = data.shape[1]
 
-    for start in range(0, n_candidates, batch_size):
-        stop = min(start + batch_size, n_candidates)
+    for start in range(0, num_candidates, batch_size):
+        stop = min(start + batch_size, num_candidates)
 
-        rel_delay = relative_spherical_delays(
-            R_flat[start:stop], theta_flat[start:stop], antenna_x
+        relative_delay = _relative_spherical_delays_gpu(
+            R_flat[start:stop],
+            theta_flat[start:stop],
+            antenna_x_gpu,
         )
 
-        sample_pos = (
-            tau_grid[None, None, :] + rel_delay[:, :, None] - t0
+        sample_position = (
+            tau_grid_gpu[None, None, :]
+            + relative_delay[:, :, None]
+            - t0
         ) / dt
 
-        i0 = np.floor(sample_pos).astype(np.int64)
-        frac = sample_pos - i0
-        valid = (i0 >= 0) & (i0 < nt - 1)
-        i0_safe = np.clip(i0, 0, nt - 2)
+        index0 = cp.floor(sample_position).astype(cp.int64)
+        fraction = sample_position - index0
 
-        s0 = data[antenna_idx, i0_safe]
-        s1 = data[antenna_idx, i0_safe + 1]
-        samples = ((1.0 - frac) * s0 + frac * s1) * valid
+        valid = (
+            (index0 >= 0)
+            & (index0 < num_time_samples - 1)
+        )
+        index0_safe = cp.clip(
+            index0,
+            0,
+            num_time_samples - 2,
+        )
+
+        sample0 = data_gpu[antenna_indices, index0_safe]
+        sample1 = data_gpu[antenna_indices, index0_safe + 1]
+
+        samples = (
+            (1.0 - fraction) * sample0
+            + fraction * sample1
+        )
+        samples *= valid
 
         if carrier_phase_correction:
-            phase = np.exp(1j * 2.0 * np.pi * fc * rel_delay)[:, :, None]
+            phase = cp.exp(
+                1j
+                * 2.0
+                * cp.pi
+                * fc
+                * relative_delay
+            )[:, :, None]
             samples *= phase
 
-        out[:, start:stop] = np.sum(samples, axis=0).T / data.shape[0]
+        output_gpu[:, start:stop] = (
+            cp.sum(samples, axis=0).T / num_antennas
+        )
 
-    return out.reshape(nt_tau, nr, nt_theta)
+    output_gpu = output_gpu.reshape(
+        num_tau,
+        num_ranges,
+        num_angles,
+    )
 
+    return cp.asnumpy(output_gpu)
+
+
+# ============================================================
+# Peak detection
+# ============================================================
 
 def hrt_peak(hrt, tau_grid, range_grid, theta_grid):
     """Return (tau_hat, R_hat, theta_hat, peak_value, index)."""
@@ -126,20 +317,52 @@ def hrt_peak(hrt, tau_grid, range_grid, theta_grid):
     range_grid = np.asarray(range_grid, dtype=float)
     theta_grid = np.asarray(theta_grid, dtype=float)
 
-    expected = (len(tau_grid), len(range_grid), len(theta_grid))
-    if hrt.shape != expected:
-        raise ValueError(f"hrt shape must be {expected}, got {hrt.shape}")
+    expected_shape = (
+        len(tau_grid),
+        len(range_grid),
+        len(theta_grid),
+    )
+
+    if hrt.shape != expected_shape:
+        raise ValueError(
+            f"hrt shape must be {expected_shape}, got {hrt.shape}"
+        )
 
     magnitude = np.abs(hrt)
-    idx = np.unravel_index(np.argmax(magnitude), magnitude.shape)
+    index = np.unravel_index(
+        np.argmax(magnitude),
+        magnitude.shape,
+    )
 
-    tau_hat = float(tau_grid[idx[0]])
-    R_hat = float(range_grid[idx[1]])
-    theta_hat = float(theta_grid[idx[2]])
-    peak = float(magnitude[idx])
+    tau_hat = float(tau_grid[index[0]])
+    range_hat = float(range_grid[index[1]])
+    theta_hat = float(theta_grid[index[2]])
+    peak_value = float(magnitude[index])
 
-    return tau_hat, R_hat, theta_hat, peak, idx
+    return (
+        tau_hat,
+        range_hat,
+        theta_hat,
+        peak_value,
+        index,
+    )
 
+
+# ============================================================
+# Quick GPU check
+# ============================================================
 
 if __name__ == "__main__":
-    print("HRT module loaded successfully.")
+    device_id = cp.cuda.Device().id
+    properties = cp.cuda.runtime.getDeviceProperties(device_id)
+    device_name = properties["name"]
+
+    if isinstance(device_name, bytes):
+        device_name = device_name.decode()
+
+    free_memory, total_memory = cp.cuda.runtime.memGetInfo()
+
+    print("GPU HRT module loaded successfully.")
+    print(f"CUDA device: {device_name}")
+    print(f"Free GPU memory: {free_memory / 1024**3:.2f} GiB")
+    print(f"Total GPU memory: {total_memory / 1024**3:.2f} GiB")
