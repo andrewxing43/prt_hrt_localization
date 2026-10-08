@@ -14,7 +14,7 @@ from transforms.prt import parabolic_radon_transform
 from localization.parameter_mapping import pq_to_range, p_to_theta_deg
 
 
-R_TRUE, THETA_TRUE, CLOCK_OFFSET, SNR_DB = 200.37, 17.37, 10e-9, 10.0
+R_TRUE, THETA_TRUE, CLOCK_OFFSET = 200.37, 17.37, 10e-9
 THETA_STEP, THETA_HALF_BINS, TAU_HALF_SAMPLES = PRT.theta_step_deg, 4, 3
 R_MIN, R_MAX, DQ = 40.0, 500.0, PRT.dq
 DBSCAN_THRESHOLD, DBSCAN_EPS, DBSCAN_MIN_SAMPLES = 0.5, 1.8, 3
@@ -92,7 +92,7 @@ def main():
     theta_grid, p_grid, q_grid = build_grids(THETA_TRUE)
 
     rx, _ = received_signal(time_axis, R_TRUE, THETA_TRUE, CLOCK_OFFSET, antenna_x=antenna_x)
-    rx, _ = add_awgn(rx, SNR_DB, rng=np.random.default_rng(SIM.rng_seed))
+    rx, _ = add_awgn(rx, rng=np.random.default_rng(SIM.rng_seed))
     mf_rx = matched_filter(rx)
 
     prt = parabolic_radon_transform(mf_rx, antenna_x, p_grid, q_grid)
@@ -101,9 +101,12 @@ def main():
     argmax_result = estimate_argmax(score, tau_idx, time_axis, p_grid, q_grid)
     dbscan_result = estimate_dbscan(score, tau_idx, time_axis, p_grid, q_grid)
 
+    snr_db = SIM.reference_snr_db + 20.0 * np.log10(SIM.reference_range / R_TRUE)
+
     print(f"True   : R={R_TRUE:.6f} m, theta={THETA_TRUE:.6f} deg, tau={tau_true*1e9:.6f} ns")
     print(f"Argmax : R={argmax_result[1]:.6f} m, theta={argmax_result[2]:.6f} deg, tau={argmax_result[3]*1e9:.6f} ns")
     print(f"DBSCAN : R={dbscan_result[1]:.6f} m, theta={dbscan_result[2]:.6f} deg, tau={dbscan_result[3]*1e9:.6f} ns")
+    print(f"SNR≈{snr_db:.2f} dB, Tx={SIM.tx_power_dbm:.3f} dBm")
     print(f"Clusters={dbscan_result[6]}, candidates={dbscan_result[7]}")
     print(f"Same grid peak: {argmax_result[0] == dbscan_result[0]}")
 
