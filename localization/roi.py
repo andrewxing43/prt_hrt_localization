@@ -9,9 +9,10 @@ from config import C, PRT
 # ============================================================
 
 DQ = PRT.dq
-K_Q = 4.5
+K_Q = 4.5 # 6 if 1000m, 4.5 if 400m
 
 THETA_HALF_WIDTH_DEG = 0.2
+P_HALF_WIDTH_BINS = 2
 TAU_HALF_WIDTH_SAMPLES = 2
 
 
@@ -59,20 +60,15 @@ def range_roi_half_width(
     theta_half_width_deg=THETA_HALF_WIDTH_DEG
 ):
     """
-    Calculate range ROI half-width.
-
     W_R =
         2*c*R_hat^2/cos^2(theta_hat) * (K_q * dq)
-        +
-        2*R_hat*|tan(theta_hat)| * delta_theta
+        + 2*R_hat*|tan(theta_hat)| * delta_theta
     """
-
     R_hat = float(R_hat)
     theta_hat_deg = float(theta_hat_deg)
 
     if not np.isfinite(R_hat) or R_hat <= 0:
         raise ValueError("R_hat must be finite and > 0")
-
     if not np.isfinite(theta_hat_deg):
         raise ValueError("theta_hat_deg must be finite")
 
@@ -105,56 +101,70 @@ def build_roi(
     tau_half_width_samples=TAU_HALF_WIDTH_SAMPLES,
     range_bounds=None,
     theta_bounds=None,
-    tau_bounds=None
+    tau_bounds=None,
+    dp=None,
+    p_half_width_bins=P_HALF_WIDTH_BINS
 ):
     """
     Build the (R, theta, tau) ROI around the PRT estimate.
 
-    Parameters
-    ----------
-    R_hat : float
-        PRT range estimate [m].
+    With dp:
+        Convert p_hat +/- p_half_width_bins * dp to theta bounds.
+        Use the larger angular half-width in the range ROI formula.
 
-    theta_hat_deg : float
-        PRT angle estimate [deg].
-
-    tau_hat : float
-        PRT tau estimate [s].
-
-    range_bounds : tuple or None
-        Optional global physical range bounds.
-
-    theta_bounds : tuple or None
-        Optional global physical angle bounds.
-
-    tau_bounds : tuple or None
-        Optional global tau bounds.
+    Without dp:
+        Preserve the original fixed angular half-width.
     """
-
+    R_hat = float(R_hat)
+    theta_hat_deg = float(theta_hat_deg)
     tau_hat = float(tau_hat)
 
     if not np.isfinite(tau_hat):
         raise ValueError("tau_hat must be finite")
+    if not np.isfinite(theta_hat_deg):
+        raise ValueError("theta_hat_deg must be finite")
+
+    if dp is None:
+        W_theta = float(theta_half_width_deg)
+        theta_min = theta_hat_deg - W_theta
+        theta_max = theta_hat_deg + W_theta
+    else:
+        dp = float(dp)
+        p_half_width_bins = float(p_half_width_bins)
+
+        if not np.isfinite(dp) or dp <= 0:
+            raise ValueError("dp must be finite and > 0")
+        if not np.isfinite(p_half_width_bins) or p_half_width_bins <= 0:
+            raise ValueError("p_half_width_bins must be finite and > 0")
+
+        p_hat = -np.sin(np.deg2rad(theta_hat_deg)) / C
+        W_p = p_half_width_bins * dp
+
+        p_edges = np.array([p_hat - W_p, p_hat + W_p])
+        theta_edges = np.rad2deg(
+            np.arcsin(np.clip(-C * p_edges, -1.0, 1.0))
+        )
+
+        theta_min = float(np.min(theta_edges))
+        theta_max = float(np.max(theta_edges))
+        W_theta = float(max(
+            abs(theta_hat_deg - theta_min),
+            abs(theta_max - theta_hat_deg)
+        ))
 
     W_R = range_roi_half_width(
         R_hat,
         theta_hat_deg,
         dq=dq,
         k_q=k_q,
-        theta_half_width_deg=theta_half_width_deg
+        theta_half_width_deg=W_theta
     )
-
-    W_theta = float(theta_half_width_deg)
     W_tau = float(tau_half_width_samples * PRT.tau_step)
 
-    R_min = float(R_hat - W_R)
-    R_max = float(R_hat + W_R)
-
-    theta_min = float(theta_hat_deg - W_theta)
-    theta_max = float(theta_hat_deg + W_theta)
-
-    tau_min = float(tau_hat - W_tau)
-    tau_max = float(tau_hat + W_tau)
+    R_min = R_hat - W_R
+    R_max = R_hat + W_R
+    tau_min = tau_hat - W_tau
+    tau_max = tau_hat + W_tau
 
     if range_bounds is not None:
         R_min, R_max = _clip_interval(
@@ -191,11 +201,7 @@ def build_roi(
 def _clip_interval(lo, hi, bounds, name):
     b0, b1 = map(float, bounds)
 
-    if not (
-        np.isfinite(b0)
-        and np.isfinite(b1)
-        and b0 <= b1
-    ):
+    if not (np.isfinite(b0) and np.isfinite(b1) and b0 <= b1):
         raise ValueError(f"{name} must satisfy min <= max")
 
     lo = max(lo, b0)
@@ -212,7 +218,6 @@ def _clip_interval(lo, hi, bounds, name):
 # ============================================================
 
 if __name__ == "__main__":
-
     R_hat = 200.0
     theta_hat = 30.0
     tau_hat = R_hat / C

@@ -17,37 +17,54 @@ from localization.parameter_mapping import pq_to_range, p_to_theta_deg
 
 
 # ============================================================
-# Experiment settings
+# Settings
 # ============================================================
 
 USERS = [
-    {"range_m": 200.00, "theta_deg": 17.08},
-    {"range_m": 200.03, "theta_deg": 20.68},
+    {"range_m": 100.00, "theta_deg": 41.58},
+    {"range_m": 200.00, "theta_deg": 41.58},
 ]
 
-CLOCK_OFFSET = 10e-9
+BASE_CLOCK_OFFSET = 10e-9
+THETA_MARGIN_BINS, TAU_MARGIN_SAMPLES = 2, 2
+PRT_R_MIN, PRT_R_MAX, PRT_THETA_LIMIT = 40.0, 500.0, 60.0
 
-THETA_MARGIN_BINS = 2
-TAU_MARGIN_SAMPLES = 2
-
-PRT_R_MIN, PRT_R_MAX = 40.0, 500.0
-PRT_THETA_LIMIT = 60.0
-
-DBSCAN_THRESHOLD = 0.5
-DBSCAN_EPS = 1.8
+DBSCAN_THRESHOLD = 0.05
+DBSCAN_EPS = 1.01
 DBSCAN_MIN_SAMPLES = 3
+
+COMMON_TAU = max(u["range_m"] for u in USERS) / C + BASE_CLOCK_OFFSET
+
+GLOBAL_THETA_GRID = np.arange(
+    -PRT_THETA_LIMIT, PRT_THETA_LIMIT + 0.5 * PRT.theta_step_deg,
+    PRT.theta_step_deg
+)
 
 
 # ============================================================
-# Signal and search grids
+# Timing
+# ============================================================
+
+def user_clock_offset(user):
+    return COMMON_TAU - user["range_m"] / C
+
+
+def user_tau(user):
+    return user["range_m"] / C + user_clock_offset(user)
+
+
+# ============================================================
+# Signal and grids
 # ============================================================
 
 def build_time_axis(users, antenna_x):
-    all_delays = [
-        propagation_delays(u["range_m"], u["theta_deg"], CLOCK_OFFSET, antenna_x)
+    delays = np.concatenate([
+        propagation_delays(
+            u["range_m"], u["theta_deg"], user_clock_offset(u), antenna_x
+        )
         for u in users
-    ]
-    delays = np.concatenate(all_delays)
+    ])
+
     margin = 8.0 * SYSTEM.gaussian_sigma
     n0 = int(np.floor((delays.min() - margin) / SYSTEM.dt))
     n1 = int(np.ceil((delays.max() + margin) / SYSTEM.dt))
@@ -55,18 +72,17 @@ def build_time_axis(users, antenna_x):
 
 
 def build_local_p_grid(users):
-    theta_values = np.array([u["theta_deg"] for u in users])
+    theta = np.array([u["theta_deg"] for u in users])
     margin = THETA_MARGIN_BINS * PRT.theta_step_deg
-    theta_min = theta_values.min() - margin
-    theta_max = theta_values.max() + margin
+    lo, hi = theta.min() - margin, theta.max() + margin
 
-    theta_grid = np.arange(
-        theta_min,
-        theta_max + 0.5 * PRT.theta_step_deg,
-        PRT.theta_step_deg,
-    )
-    p_grid = -np.sin(np.deg2rad(theta_grid)) / C
-    return theta_grid, p_grid
+    theta_grid = GLOBAL_THETA_GRID[
+        (GLOBAL_THETA_GRID >= lo) & (GLOBAL_THETA_GRID <= hi)
+    ]
+    if theta_grid.size == 0:
+        raise ValueError("Local theta grid is empty.")
+
+    return theta_grid, -np.sin(np.deg2rad(theta_grid)) / C
 
 
 def build_global_q_grid():
@@ -75,26 +91,26 @@ def build_global_q_grid():
     return np.arange(q_min - 2 * PRT.dq, q_max + 2 * PRT.dq, PRT.dq)
 
 
-def get_local_tau_indices(users, time_axis):
-    tau_values = np.array([
-        u["range_m"] / C + CLOCK_OFFSET for u in users
-    ])
+def get_local_tau_indices(time_axis):
     margin = TAU_MARGIN_SAMPLES * PRT.tau_step
-    tau_min = tau_values.min() - margin
-    tau_max = tau_values.max() + margin
-    return np.where((time_axis >= tau_min) & (time_axis <= tau_max))[0]
+    indices = np.where(
+        (time_axis >= COMMON_TAU - margin) &
+        (time_axis <= COMMON_TAU + margin)
+    )[0]
+
+    if indices.size == 0:
+        raise ValueError("Local tau grid is empty.")
+
+    return indices
 
 
-def generate_two_user_signal(users, time_axis, antenna_x):
+def generate_multi_user_signal(users, time_axis, antenna_x):
     total_rx = np.zeros((len(antenna_x), len(time_axis)), dtype=np.complex128)
 
     for user in users:
         rx, _ = received_signal(
-            time_axis,
-            user["range_m"],
-            user["theta_deg"],
-            clock_offset=CLOCK_OFFSET,
-            antenna_x=antenna_x,
+            time_axis, user["range_m"], user["theta_deg"],
+            clock_offset=user_clock_offset(user), antenna_x=antenna_x
         )
         total_rx += rx
 
@@ -102,7 +118,7 @@ def generate_two_user_signal(users, time_axis, antenna_x):
 
 
 # ============================================================
-# DBSCAN peak detection
+# DBSCAN
 # ============================================================
 
 def valid_pq_mask(p_grid, q_grid):
@@ -120,15 +136,13 @@ def detect_prt_clusters(prt, time_axis, tau_indices, p_grid, q_grid):
         return []
 
     threshold = DBSCAN_THRESHOLD * finite_score.max()
-    candidate_mask = np.isfinite(score) & (score >= threshold)
-    points = np.argwhere(candidate_mask)
+    points = np.argwhere(np.isfinite(score) & (score >= threshold))
 
     if len(points) < DBSCAN_MIN_SAMPLES:
         return []
 
     labels = DBSCAN(
-        eps=DBSCAN_EPS,
-        min_samples=DBSCAN_MIN_SAMPLES,
+        eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES
     ).fit_predict(points.astype(float))
 
     estimates = []
@@ -137,16 +151,15 @@ def detect_prt_clusters(prt, time_axis, tau_indices, p_grid, q_grid):
         if label == -1:
             continue
 
-        cluster_points = points[labels == label]
-        cluster_values = score[tuple(cluster_points.T)]
-        peak_point = cluster_points[np.argmax(cluster_values)]
+        cluster = points[labels == label]
+        values = score[tuple(cluster.T)]
+        peak = cluster[np.argmax(values)]
 
-        tau_local_idx, p_idx, q_idx = map(int, peak_point)
+        tau_local_idx, p_idx, q_idx = map(int, peak)
         tau_idx = int(tau_indices[tau_local_idx])
 
         tau_hat = float(time_axis[tau_idx])
-        p_hat = float(p_grid[p_idx])
-        q_hat = float(q_grid[q_idx])
+        p_hat, q_hat = float(p_grid[p_idx]), float(q_grid[q_idx])
         range_hat = float(pq_to_range(p_hat, q_hat))
         theta_hat = float(p_to_theta_deg(p_hat))
 
@@ -158,16 +171,16 @@ def detect_prt_clusters(prt, time_axis, tau_indices, p_grid, q_grid):
             "range_m": range_hat,
             "theta_deg": theta_hat,
             "tau_s": tau_hat,
+            "clock_offset_s": tau_hat - range_hat / C,
             "x_m": x_hat,
             "y_m": y_hat,
             "p_s_per_m": p_hat,
             "q_s_per_m2": q_hat,
-            "peak": float(cluster_values.max()),
-            "cluster_size": int(len(cluster_points)),
+            "peak": float(values.max()),
+            "cluster_size": int(len(cluster)),
         })
 
-    estimates.sort(key=lambda item: item["peak"], reverse=True)
-    return estimates
+    return sorted(estimates, key=lambda x: x["peak"], reverse=True)
 
 
 # ============================================================
@@ -179,79 +192,90 @@ def estimate_users(users=USERS):
     time_axis = build_time_axis(users, antenna_x)
     theta_grid, p_grid = build_local_p_grid(users)
     q_grid = build_global_q_grid()
-    tau_indices = get_local_tau_indices(users, time_axis)
+    tau_indices = get_local_tau_indices(time_axis)
 
-    clean_rx = generate_two_user_signal(users, time_axis, antenna_x)
+    clean_rx = generate_multi_user_signal(users, time_axis, antenna_x)
     noisy_rx, _ = add_awgn(clean_rx, rng=np.random.default_rng(SIM.rng_seed))
     mf_rx = matched_filter(noisy_rx)
 
-    prt = parabolic_radon_transform(
-        mf_rx,
-        antenna_x,
-        p_grid,
-        q_grid,
-    )
-
+    prt = parabolic_radon_transform(mf_rx, antenna_x, p_grid, q_grid)
     estimates = detect_prt_clusters(
-        prt,
-        time_axis,
-        tau_indices,
-        p_grid,
-        q_grid,
+        prt, time_axis, tau_indices, p_grid, q_grid
     )
 
-    return len(estimates), estimates, theta_grid, time_axis[tau_indices]
+    return len(estimates), estimates, theta_grid, time_axis[tau_indices], q_grid
 
+
+# ============================================================
+# Output
+# ============================================================
 
 def main():
-    num_users, estimates, theta_grid, tau_grid = estimate_users()
+    num_users, estimates, theta_grid, tau_grid, q_grid = estimate_users()
 
-    print("=" * 72)
+    print("=" * 76)
+    print(f"COMMON TAU: {COMMON_TAU * 1e9:.6f} ns")
+    print("=" * 76)
     print("TRUE USERS")
-    print("=" * 72)
+    print("=" * 76)
 
-    for i, user in enumerate(USERS, start=1):
-        tau_true = user["range_m"] / C + CLOCK_OFFSET
-        theta = np.deg2rad(user["theta_deg"])
-        x_true = user["range_m"] * np.sin(theta)
-        y_true = user["range_m"] * np.cos(theta)
+    for i, user in enumerate(USERS, 1):
+        R, theta = user["range_m"], user["theta_deg"]
+        tau, offset = user_tau(user), user_clock_offset(user)
+        theta_rad = np.deg2rad(theta)
+        x, y = R * np.sin(theta_rad), R * np.cos(theta_rad)
+
+        nearest = float(theta_grid[np.argmin(np.abs(theta_grid - theta))])
+        grid_offset = theta - nearest
+        status = "ON-GRID" if np.isclose(grid_offset, 0.0, atol=1e-12) else "OFF-GRID"
 
         print(
-            f"User {i}: R={user['range_m']:.6f} m, "
-            f"theta={user['theta_deg']:.6f} deg, "
-            f"tau={tau_true * 1e9:.6f} ns, "
-            f"x={x_true:.6f} m, y={y_true:.6f} m"
+            f"User {i}: R={R:.6f} m, theta={theta:.6f} deg, "
+            f"tau={tau * 1e9:.6f} ns, clock={offset * 1e9:.6f} ns"
+        )
+        print(
+            f"        x={x:.6f} m, y={y:.6f} m, "
+            f"nearest theta={nearest:.6f} deg, "
+            f"offset={grid_offset:+.6f} deg, {status}"
         )
 
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 76)
     print("LOCAL PRT SEARCH")
-    print("=" * 72)
+    print("=" * 76)
     print(
-        f"theta: {theta_grid[0]:.3f} to {theta_grid[-1]:.3f} deg, "
+        f"theta={theta_grid[0]:.3f} to {theta_grid[-1]:.3f} deg, "
         f"Np={len(theta_grid)}"
     )
     print(
-        f"tau: {tau_grid[0] * 1e9:.6f} to "
-        f"{tau_grid[-1] * 1e9:.6f} ns, Ntau={len(tau_grid)}"
+        f"tau={tau_grid[0] * 1e9:.6f} to {tau_grid[-1] * 1e9:.6f} ns, "
+        f"Ntau={len(tau_grid)}"
+    )
+    print(
+        f"q={q_grid[0]:.6e} to {q_grid[-1]:.6e} s/m², "
+        f"Nq={len(q_grid)}"
     )
 
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 76)
     print(f"DBSCAN DETECTED USERS: {num_users}")
-    print("=" * 72)
+    print("=" * 76)
 
     if num_users == 0:
         print("No valid DBSCAN cluster was detected.")
         return
 
-    for i, estimate in enumerate(estimates, start=1):
+    for i, est in enumerate(estimates, 1):
         print(
-            f"User {i}: R={estimate['range_m']:.6f} m, "
-            f"theta={estimate['theta_deg']:.6f} deg, "
-            f"tau={estimate['tau_s'] * 1e9:.6f} ns, "
-            f"x={estimate['x_m']:.6f} m, "
-            f"y={estimate['y_m']:.6f} m, "
-            f"peak={estimate['peak']:.6e}, "
-            f"cluster_size={estimate['cluster_size']}"
+            f"User {i}: R={est['range_m']:.6f} m, "
+            f"theta={est['theta_deg']:.6f} deg, "
+            f"tau={est['tau_s'] * 1e9:.6f} ns"
+        )
+        print(
+            f"        clock={est['clock_offset_s'] * 1e9:.6f} ns, "
+            f"x={est['x_m']:.6f} m, y={est['y_m']:.6f} m"
+        )
+        print(
+            f"        peak={est['peak']:.6e}, "
+            f"cluster_size={est['cluster_size']}"
         )
 
 

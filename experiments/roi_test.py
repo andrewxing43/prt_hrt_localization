@@ -14,18 +14,18 @@ from signal_model.matched_filter import matched_filter
 from transforms.prt import parabolic_radon_transform
 from localization.parameter_mapping import range_theta_to_pq, pq_to_range, p_to_theta_deg
 
-N_POSITIONS = 50
+N_POSITIONS = 500
 
-R_MIN, R_MAX = 50.0, 400.0
+R_MIN, R_MAX = 50.0, 1000.0
 THETA_MIN, THETA_MAX = -60.0, 60.0
 
 P_STEP_DEG, N_LOCAL_P, N_LOCAL_TAU = PRT.theta_step_deg, 4, 4
 DQ = PRT.dq
-K = 4.5
+K = 6 #k=4.5 if R_max=400
 DELTA_THETA_MAX_DEG = 0.2
 
 P_GRID_MIN_DEG, P_GRID_MAX_DEG = -65.0, 65.0
-Q_SEARCH_R_MIN, Q_SEARCH_R_MAX, Q_SEARCH_THETA_MAX = 40.0, 500.0, 65.0
+Q_SEARCH_R_MIN, Q_SEARCH_R_MAX, Q_SEARCH_THETA_MAX = 40.0, 1100.0, 65.0
 
 THETA_GRID = np.arange(P_GRID_MIN_DEG, P_GRID_MAX_DEG + 0.5 * P_STEP_DEG, P_STEP_DEG)
 P_GRID = -np.sin(np.deg2rad(THETA_GRID)) / C

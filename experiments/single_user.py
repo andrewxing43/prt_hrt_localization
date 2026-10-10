@@ -1,21 +1,13 @@
 """
-500-run Monte Carlo test for PRT -> ROI -> HRT pipeline.
+Monte Carlo test for PRT -> ROI -> HRT pipeline.
 
 Each run:
-- Random off-grid user
-- R ~ U(50, 400) m
-- theta ~ U(-60, 60) deg
-- Physical free-space path loss
-- Thermal AWGN with fixed kTB
-- Run current truth-assisted pipeline
+- R ~ U(50, 400) m, theta ~ U(-60, 60) deg
+- Physical free-space path loss and fixed thermal AWGN
+- Truth-assisted PRT -> ROI -> HRT
 - Record final 2-D localization error
 
-Outputs:
-- Progress bar
-- Error CDF
-- ALE
-- RMSE
-- True user position map with color = absolute error
+Outputs: progress bar, error CDF, ALE, RMSE, spatial error map.
 """
 
 from pathlib import Path
@@ -25,6 +17,7 @@ if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tqdm import trange
 
 from config import C, SYSTEM, ARRAY, SIM
@@ -33,7 +26,7 @@ from signal_model.noise import add_awgn
 from localization.pipeline import localize
 
 
-N_MC = 250
+N_MC = 2000
 R_MIN, R_MAX = 50.0, 400.0
 THETA_MIN, THETA_MAX = -60.0, 60.0
 CLOCK_OFFSET = 10e-9
@@ -125,8 +118,11 @@ def main():
     plt.tight_layout()
 
     fig, ax = plt.subplots(figsize=(8.6, 8.2))
-    sc = ax.scatter(x_true_all, y_true_all, c=errors, s=42, cmap="turbo", edgecolors="k", linewidths=0.25)
-    draw_user_region(ax)
+    sc = ax.scatter(
+    x_true_all, y_true_all, c=errors, s=42,
+    cmap="viridis", edgecolors="none"
+)
+    # draw_user_region(ax)
 
     xmax = R_MAX * np.sin(np.deg2rad(max(abs(THETA_MIN), abs(THETA_MAX))))
     ax.set_xlim(-xmax - 25, xmax + 25)
@@ -137,12 +133,16 @@ def main():
     ax.set_title("True User Positions Colored by Absolute Localization Error")
     ax.grid(True, alpha=0.3)
 
-    cbar = fig.colorbar(sc, ax=ax, pad=0.02)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="4%", pad=0.15)
+    cbar = fig.colorbar(sc, cax=cax)
     cbar.set_label("Absolute Error (m)")
 
     txt = f"N={N_MC}\nALE={ALE:.3f} m\nRMSE={RMSE:.3f} m"
-    ax.text(0.02, 0.98, txt, transform=ax.transAxes, va="top", ha="left",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray"))
+    ax.text(
+        0.02, 0.98, txt, transform=ax.transAxes, va="top", ha="left",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+    )
 
     plt.tight_layout()
     plt.show()

@@ -42,6 +42,7 @@ class ArrayConfig:
 class PRTConfig:
     """Shared PRT-axis discretization used by the main ROI workflow."""
     theta_step_deg: float = 0.1
+    num_p_points: int = 500
     dq: float = 1e-13
 
     @property
