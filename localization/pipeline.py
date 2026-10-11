@@ -6,8 +6,8 @@ Modes:
    -> blind/global PRT: global p, global tau, global q.
 
 2. localize(rx, time_axis, antenna_x, theta_hint, tau_hint)
-   -> preliminary truth-assisted PRT:
-      4 p bins around theta_hint, 4 tau bins around tau_hint, global q.
+   -> truth-assisted PRT:
+      4 p bins around p_hint, 4 tau bins around tau_hint, global q.
 
 After PRT, ROI and HRT do not use hints.
 """
@@ -28,11 +28,13 @@ from localization.roi import build_roi
 # ============================================================
 
 PRT_THETA_MIN, PRT_THETA_MAX = -60.0, 60.0
-PRT_R_MIN, PRT_R_MAX = 40.0, 500.0
+PRT_R_MIN, PRT_R_MAX = 50.0, 400.0
 N_LOCAL_P, N_LOCAL_TAU = 4, 4
 
-THETA_GRID = np.arange(PRT_THETA_MIN, PRT_THETA_MAX + 0.5 * PRT.theta_step_deg, PRT.theta_step_deg)
-P_GRID_GLOBAL = -np.sin(np.deg2rad(THETA_GRID)) / C
+P_MIN = -np.sin(np.deg2rad(PRT_THETA_MAX)) / C
+P_MAX = -np.sin(np.deg2rad(PRT_THETA_MIN)) / C
+P_GRID_GLOBAL = np.linspace(P_MIN, P_MAX, PRT.num_p_points)
+DP = float(P_GRID_GLOBAL[1] - P_GRID_GLOBAL[0])
 
 Q_MIN = np.cos(np.deg2rad(60.0))**2 / (2.0 * PRT_R_MAX * C)
 Q_MAX = 1.0 / (2.0 * PRT_R_MIN * C)
@@ -43,8 +45,8 @@ Q_GRID = np.arange(Q_MIN - 2 * PRT.dq, Q_MAX + 2 * PRT.dq, PRT.dq)
 # HRT settings
 # ============================================================
 
-HRT_DR = 1.0
-HRT_DTHETA = 0.005
+HRT_DR = 2.0
+HRT_DTHETA = 0.01
 HRT_DTAU = SYSTEM.dt / 4
 
 
@@ -70,7 +72,8 @@ def nearest_indices(grid, value, n):
 
 
 def local_p_grid(theta_hint):
-    return P_GRID_GLOBAL[nearest_indices(THETA_GRID, theta_hint, N_LOCAL_P)]
+    p_hint = -np.sin(np.deg2rad(theta_hint)) / C
+    return P_GRID_GLOBAL[nearest_indices(P_GRID_GLOBAL, p_hint, N_LOCAL_P)]
 
 
 def local_tau_indices(time_axis, tau_hint):
@@ -160,8 +163,11 @@ def localize(rx, time_axis, antenna_x, theta_hint=None, tau_hint=None):
     mf_rx = matched_filter(rx)
     R_prt, theta_prt, tau_prt, prt_peak = run_prt(mf_rx, time_axis, antenna_x, theta_hint, tau_hint)
 
-    roi = build_roi(R_prt, theta_prt, tau_prt, range_bounds=(PRT_R_MIN, PRT_R_MAX),
-                    theta_bounds=(PRT_THETA_MIN, PRT_THETA_MAX))
+    roi = build_roi(
+        R_prt, theta_prt, tau_prt, dp=DP,
+        range_bounds=(PRT_R_MIN, PRT_R_MAX),
+        theta_bounds=(PRT_THETA_MIN, PRT_THETA_MAX)
+    )
 
     R_hat, theta_hat, tau_hat, hrt_peak = run_hrt(mf_rx, time_axis, antenna_x, roi)
     x_hat, y_hat = polar_to_xy(R_hat, theta_hat)

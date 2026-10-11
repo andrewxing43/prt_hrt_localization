@@ -14,17 +14,16 @@ from signal_model.matched_filter import matched_filter
 from transforms.prt import parabolic_radon_transform
 from localization.parameter_mapping import range_theta_to_pq, pq_to_range, p_to_theta_deg
 
-SNR_DB = 10.0
-N_POSITIONS, N_MC = 200, 5
+N_POSITIONS, N_MC = 1000, 5
 
-R_MIN, R_MAX = 50.0, 400.0
+R_MIN, R_MAX = 50.0, 1000.0
 THETA_MIN, THETA_MAX = -60.0, 60.0
 
 P_STEP_DEG, N_LOCAL_P, N_LOCAL_TAU = PRT.theta_step_deg, 4, 4
 DQ = PRT.dq
 
 P_GRID_MIN_DEG, P_GRID_MAX_DEG = -65.0, 65.0
-Q_SEARCH_R_MIN, Q_SEARCH_R_MAX, Q_SEARCH_THETA_MAX = 40.0, 500.0, 65.0
+Q_SEARCH_R_MIN, Q_SEARCH_R_MAX, Q_SEARCH_THETA_MAX = 50.0, 1000.0, 65.0
 
 THETA_GRID = np.arange(P_GRID_MIN_DEG, P_GRID_MAX_DEG + 0.5 * P_STEP_DEG, P_STEP_DEG)
 P_GRID = -np.sin(np.deg2rad(THETA_GRID)) / C
@@ -78,6 +77,7 @@ def main():
     position_results = []
 
     print(f"Positions={N_POSITIONS}, MC/position={N_MC}, total={N_POSITIONS*N_MC}, Delta q={DQ:.1e}")
+    print(f"Tx power={SIM.tx_power_dbm:.3f} dBm, thermal noise={10*np.log10(SIM.noise_power/1e-3):.3f} dBm")
 
     progress = tqdm(range(N_POSITIONS), desc="Positions", unit="pos")
 
@@ -98,7 +98,7 @@ def main():
         Kq_list, Rerr_list, theta_err_list, tau_err_list = [], [], [], []
 
         for mc in range(N_MC):
-            noisy_rx, _ = add_awgn(clean_rx, snr_db=SNR_DB, rng=rng_noise)
+            noisy_rx, _ = add_awgn(clean_rx, rng=rng_noise)
             mf_rx = matched_filter(noisy_rx)
             prt = parabolic_radon_transform(mf_rx, antenna_x, p_local, q_local)
             tau_hat, p_hat, q_hat = find_peak(prt, time_axis, p_local, q_local, tau_true)
@@ -128,11 +128,7 @@ def main():
 
         position_results.append(result)
 
-        progress.set_postfix(
-            R=f"{R_true:.1f}",
-            theta=f"{theta_true:.1f}",
-            Kq99=f"{result['Kq99']:.2f}"
-        )
+        progress.set_postfix(R=f"{R_true:.1f}", theta=f"{theta_true:.1f}", Kq99=f"{result['Kq99']:.2f}")
 
     progress.close()
 

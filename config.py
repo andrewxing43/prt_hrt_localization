@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.constants import speed_of_light as C
 
+K_B = 1.380649e-23
+
 
 @dataclass(frozen=True)
 class SystemConfig:
@@ -40,6 +42,7 @@ class ArrayConfig:
 class PRTConfig:
     """Shared PRT-axis discretization used by the main ROI workflow."""
     theta_step_deg: float = 0.1
+    num_p_points: int = 500
     dq: float = 1e-13
 
     @property
@@ -50,9 +53,25 @@ class PRTConfig:
 
 @dataclass(frozen=True)
 class SimulationConfig:
-    snr_db: float = 10.0
+    temperature: float = 300.0
+    reference_range: float = 300.0
+    reference_snr_db: float = 10.0
     pulse_span_sigma: float = 6.0
     rng_seed: int = 0
+
+    @property
+    def noise_power(self) -> float:
+        return K_B * self.temperature * SYSTEM.bandwidth
+
+    @property
+    def tx_power(self) -> float:
+        snr_linear = 10.0 ** (self.reference_snr_db / 10.0)
+        path_gain = (SYSTEM.wavelength / (4.0 * np.pi * self.reference_range)) ** 2
+        return snr_linear * self.noise_power / path_gain
+
+    @property
+    def tx_power_dbm(self) -> float:
+        return 10.0 * np.log10(self.tx_power / 1e-3)
 
 
 SYSTEM = SystemConfig()

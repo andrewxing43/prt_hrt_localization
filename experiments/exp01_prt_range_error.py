@@ -18,8 +18,6 @@ from localization.parameter_mapping import range_theta_to_pq, pq_to_range, p_to_
 # Experiment settings
 # ============================================================
 
-SNR_DB = 10.0
-
 R_VALUES = np.arange(100.0, 401.0, 25.0)
 THETA_VALUES = np.arange(-50.0, 1.0, 10.0)
 
@@ -28,7 +26,7 @@ P_SEARCH_HALF_BINS = 2
 
 TAU_SEARCH_HALF_SAMPLES = 2
 
-DQ = 3e-14
+DQ = 1e-13
 
 
 def build_time_axis(range_m, theta_deg, antenna_x):
@@ -94,32 +92,16 @@ def run_position(range_true, theta_true, antenna_x, q_grid):
     time_axis = build_time_axis(range_true, theta_true, antenna_x)
     p_grid, theta_grid = build_local_p_grid(theta_true)
 
-    rx, _ = received_signal(
-        time_axis,
-        range_true,
-        theta_true,
-        antenna_x=antenna_x
-    )
+    rx, _ = received_signal(time_axis, range_true, theta_true, antenna_x=antenna_x)
 
     rng = np.random.default_rng(SIM.rng_seed)
-    noisy_rx, _ = add_awgn(rx, snr_db=SNR_DB, rng=rng)
+    noisy_rx, _ = add_awgn(rx, rng=rng)
 
     mf_rx = matched_filter(noisy_rx)
 
-    prt = parabolic_radon_transform(
-        mf_rx,
-        antenna_x,
-        p_grid,
-        q_grid
-    )
+    prt = parabolic_radon_transform(mf_rx, antenna_x, p_grid, q_grid)
 
-    tau_hat, p_hat, q_hat = local_peak(
-        prt,
-        time_axis,
-        p_grid,
-        q_grid,
-        tau_true
-    )
+    tau_hat, p_hat, q_hat = local_peak(prt, time_axis, p_grid, q_grid, tau_true)
 
     range_hat = float(pq_to_range(p_hat, q_hat))
     theta_hat = float(p_to_theta_deg(p_hat))
@@ -174,6 +156,9 @@ def main():
         f"tau window=±{TAU_SEARCH_HALF_SAMPLES} samples\n"
     )
 
+    print(f"Tx power={SIM.tx_power_dbm:.3f} dBm")
+    print(f"Thermal noise={10.0 * np.log10(SIM.noise_power / 1e-3):.3f} dBm\n")
+
     for theta in THETA_VALUES:
         for R in R_VALUES:
             result = run_position(R, theta, antenna_x, q_grid)
@@ -204,12 +189,7 @@ def main():
     plt.figure(figsize=(9, 6))
 
     for i, theta in enumerate(THETA_VALUES):
-        plt.plot(
-            R_VALUES,
-            error_matrix[i],
-            marker="o",
-            label=f"{theta:.0f}°"
-        )
+        plt.plot(R_VALUES, error_matrix[i], marker="o", label=f"{theta:.0f}°")
 
     plt.xlabel("True range R (m)")
     plt.ylabel("Absolute range error (m)")
@@ -228,12 +208,7 @@ def main():
         error_matrix,
         origin="lower",
         aspect="auto",
-        extent=[
-            R_VALUES[0],
-            R_VALUES[-1],
-            THETA_VALUES[0],
-            THETA_VALUES[-1]
-        ]
+        extent=[R_VALUES[0], R_VALUES[-1], THETA_VALUES[0], THETA_VALUES[-1]]
     )
 
     plt.colorbar(im, label="Absolute range error (m)")

@@ -18,12 +18,11 @@ from localization.parameter_mapping import range_theta_to_pq, pq_to_range, p_to_
 # Experiment settings
 # ============================================================
 
-SNR_DB = 10.0
 THETA_TRUE = -53.5
 
 R_VALUES = np.arange(200.0, 411.0, 20.0)
 
-DQ_VALUES = [1e-11, 5e-12, 7e-13,5e-13, 1e-13]
+DQ_VALUES = [1e-11, 5e-12, 7e-13, 5e-13, 1e-13]
 
 P_ANGLE_STEP_DEG = PRT.theta_step_deg
 P_SEARCH_HALF_BINS = 2
@@ -106,11 +105,7 @@ def generate_signal(range_true, antenna_x):
 
     rng = np.random.default_rng(SIM.rng_seed)
 
-    noisy_rx, _ = add_awgn(
-        rx,
-        snr_db=SNR_DB,
-        rng=rng
-    )
+    noisy_rx, _ = add_awgn(rx, rng=rng)
 
     mf_rx = matched_filter(noisy_rx)
 
@@ -177,6 +172,8 @@ def main():
     print(f"Fixed theta = {THETA_TRUE:.2f} deg")
     print(f"Range = {R_VALUES[0]:.0f} ~ {R_VALUES[-1]:.0f} m")
     print(f"Angle step = {P_ANGLE_STEP_DEG} deg")
+    print(f"Tx power = {SIM.tx_power_dbm:.3f} dBm")
+    print(f"Thermal noise = {10.0 * np.log10(SIM.noise_power / 1e-3):.3f} dBm")
     print("p: off-grid by 0.5 bin")
     print("tau: off-grid by 0.5 sample")
     print("q-grid: shifted by 0.5 bin to avoid boundary on-grid bias\n")

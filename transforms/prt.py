@@ -1,14 +1,32 @@
+"""
+GPU-accelerated Parabolic Radon Transform using CuPy.
+
+This module preserves the original public API:
+    parabolic_radon_transform(...)
+    prt_peak(...)
+
+The PRT calculation runs on an NVIDIA GPU, while the returned PRT array
+is converted back to numpy.ndarray for compatibility with existing code.
+"""
+
 import numpy as np
+import cupy as cp
 from scipy.fft import next_fast_len
+
 from config import SYSTEM
 
 
-def parabolic_radon_transform(data: np.ndarray, antenna_x: np.ndarray,
-                              p_grid: np.ndarray, q_grid: np.ndarray,
-                              fs: float = SYSTEM.fs, fc: float = SYSTEM.fc,
-                              carrier_phase_correction: bool = True) -> np.ndarray:
+def parabolic_radon_transform(
+    data: np.ndarray,
+    antenna_x: np.ndarray,
+    p_grid: np.ndarray,
+    q_grid: np.ndarray,
+    fs: float = SYSTEM.fs,
+    fc: float = SYSTEM.fc,
+    carrier_phase_correction: bool = True,
+) -> np.ndarray:
     """
-    Compute the 3-D PRT P(tau, p, q).
+    Compute the GPU-accelerated 3-D PRT P(tau, p, q).
 
     Candidate propagation trajectory:
         t(x) = tau + p*x + q*x^2
@@ -32,75 +50,104 @@ def parabolic_radon_transform(data: np.ndarray, antenna_x: np.ndarray,
 
     Returns
     -------
-    prt : ndarray, shape (Nt, Np, Nq)
-        Complex PRT. The first axis corresponds exactly to the input
-        time-sample axis.
+    prt : numpy.ndarray, shape (Nt, Np, Nq)
+        Complex PRT returned on the CPU for compatibility with the
+        existing localization and DBSCAN code.
     """
     data = np.asarray(data, dtype=np.complex128)
-    antenna_x = np.asarray(antenna_x, dtype=float)
-    p_grid = np.asarray(p_grid, dtype=float)
-    q_grid = np.asarray(q_grid, dtype=float)
+    antenna_x = np.asarray(antenna_x, dtype=np.float64)
+    p_grid = np.asarray(p_grid, dtype=np.float64)
+    q_grid = np.asarray(q_grid, dtype=np.float64)
 
     if data.ndim != 2:
         raise ValueError("data must have shape (num_antennas, num_time_samples)")
-    if data.shape[0] != antenna_x.size:
+    if antenna_x.ndim != 1 or data.shape[0] != antenna_x.size:
         raise ValueError("antenna_x must match the antenna dimension of data")
+    if p_grid.ndim != 1 or p_grid.size == 0:
+        raise ValueError("p_grid must be a non-empty 1-D array")
+    if q_grid.ndim != 1 or q_grid.size == 0:
+        raise ValueError("q_grid must be a non-empty 1-D array")
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError("fs must be finite and > 0")
+    if not np.isfinite(fc):
+        raise ValueError("fc must be finite")
+    if cp.cuda.runtime.getDeviceCount() < 1:
+        raise RuntimeError("No CUDA-capable GPU was detected by CuPy.")
 
     num_antennas, nt_original = data.shape
+    num_p, num_q = p_grid.size, q_grid.size
 
-    # All (p, q) combinations.
-    P, Q = np.meshgrid(p_grid, q_grid, indexing="ij")
+    data_gpu = cp.asarray(data)
+    antenna_x_gpu = cp.asarray(antenna_x)
+    p_grid_gpu = cp.asarray(p_grid)
+    q_grid_gpu = cp.asarray(q_grid)
+
+    P, Q = cp.meshgrid(p_grid_gpu, q_grid_gpu, indexing="ij")
     p_flat, q_flat = P.ravel(), Q.ravel()
-    num_pq = p_flat.size
+    num_pq = int(p_flat.size)
 
-    # Relative propagation delay:
-    # delta_tau(x) = p*x + q*x^2
     delay_offset = (
-        np.outer(antenna_x, p_flat)
-        + np.outer(antenna_x**2, q_flat)
+        cp.outer(antenna_x_gpu, p_flat)
+        + cp.outer(antenna_x_gpu**2, q_flat)
     )
 
-    # Zero-padding prevents circular wrap-around during Fourier shifting.
     dt = 1.0 / fs
-    max_delay = float(np.max(np.abs(delay_offset)))
+    max_delay = float(cp.max(cp.abs(delay_offset)).item())
     guard_samples = int(np.ceil(max_delay / dt)) + 2
     nfft = next_fast_len(nt_original + 2 * guard_samples)
 
     pad_left = guard_samples
     pad_right = nfft - nt_original - pad_left
-    padded = np.pad(data, ((0, 0), (pad_left, pad_right)))
+    padded = cp.pad(data_gpu, ((0, 0), (pad_left, pad_right)))
 
-    # FFT along time.
-    data_f = np.fft.fft(padded, axis=1)
-    freqs = np.fft.fftfreq(nfft, d=dt)
+    data_f = cp.fft.fft(padded, axis=1)
+    freqs = cp.fft.fftfreq(nfft, d=dt)
 
-    # Received carrier phase contains:
-    # exp(-j*2*pi*fc*(tau + delta_tau)).
-    # Remove the spatial part exp(-j*2*pi*fc*delta_tau).
     if carrier_phase_correction:
-        carrier_corr = np.exp(1j * 2.0 * np.pi * fc * delay_offset)
+        weights = cp.exp(
+            1j * 2.0 * cp.pi * fc * delay_offset
+        ) / num_antennas
     else:
-        carrier_corr = np.ones_like(delay_offset, dtype=np.complex128)
+        weights = cp.full(
+            delay_offset.shape,
+            1.0 / num_antennas,
+            dtype=cp.complex128,
+        )
 
-    weights = carrier_corr / num_antennas
-    prt_f = np.empty((nfft, num_pq), dtype=np.complex128)
+    prt_f = cp.empty((nfft, num_pq), dtype=cp.complex128)
 
-    # r(t + delta_tau) aligns each antenna trajectory back to tau.
-    # Fourier-domain time advance:
-    # r(t + d) <-> R(f) exp(+j*2*pi*f*d)
-    for k, freq in enumerate(freqs):
-        time_corr = np.exp(1j * 2.0 * np.pi * freq * delay_offset)
-        prt_f[k] = (time_corr * weights).T @ data_f[:, k]
+    for k in range(nfft):
+        time_corr = cp.exp(
+            1j * 2.0 * cp.pi * freqs[k] * delay_offset
+        )
+        time_corr *= weights
+        prt_f[k] = time_corr.T @ data_f[:, k]
 
-    # Return to tau/time domain.
-    prt = np.fft.ifft(prt_f, axis=0)
-    prt = prt[pad_left:pad_left + nt_original]
-    return prt.reshape(nt_original, len(p_grid), len(q_grid))
+    prt_gpu = cp.fft.ifft(prt_f, axis=0)
+    prt_gpu = prt_gpu[pad_left:pad_left + nt_original]
+    prt_gpu = prt_gpu.reshape(nt_original, num_p, num_q)
+
+    return cp.asnumpy(prt_gpu)
 
 
-def prt_peak(prt: np.ndarray, time_axis: np.ndarray,
-             p_grid: np.ndarray, q_grid: np.ndarray) -> tuple[float, float, float, float, tuple[int, int, int]]:
+def prt_peak(
+    prt: np.ndarray,
+    time_axis: np.ndarray,
+    p_grid: np.ndarray,
+    q_grid: np.ndarray,
+) -> tuple[float, float, float, float, tuple[int, int, int]]:
     """Return the global 3-D PRT peak."""
+    prt = np.asarray(prt)
+    time_axis = np.asarray(time_axis, dtype=float)
+    p_grid = np.asarray(p_grid, dtype=float)
+    q_grid = np.asarray(q_grid, dtype=float)
+
+    expected_shape = (time_axis.size, p_grid.size, q_grid.size)
+    if prt.shape != expected_shape:
+        raise ValueError(
+            f"prt shape must be {expected_shape}, got {prt.shape}"
+        )
+
     magnitude = np.abs(prt)
     idx = np.unravel_index(np.argmax(magnitude), magnitude.shape)
 
@@ -113,4 +160,12 @@ def prt_peak(prt: np.ndarray, time_axis: np.ndarray,
 
 
 if __name__ == "__main__":
-    print("PRT module loaded successfully.")
+    device_id = cp.cuda.Device().id
+    properties = cp.cuda.runtime.getDeviceProperties(device_id)
+    device_name = properties["name"]
+
+    if isinstance(device_name, bytes):
+        device_name = device_name.decode()
+
+    print("GPU PRT module loaded successfully.")
+    print(f"CUDA device: {device_name}")
