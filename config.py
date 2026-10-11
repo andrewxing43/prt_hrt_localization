@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import numpy as np
+from scipy.constants import speed_of_light as C
 
-C = 299_792_458.0
 K_B = 1.380649e-23
 
 
