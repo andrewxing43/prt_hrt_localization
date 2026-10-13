@@ -22,7 +22,7 @@ from localization.parameter_mapping import pq_to_range, p_to_theta_deg
 
 USERS = [
     {"range_m": 100.00, "theta_deg": 41.58},
-    {"range_m": 200.00, "theta_deg": 41.58},
+    {"range_m": 150.00, "theta_deg": 41.58},
 ]
 
 BASE_CLOCK_OFFSET = 10e-9
