@@ -45,8 +45,8 @@ Q_GRID = np.arange(Q_MIN - 2 * PRT.dq, Q_MAX + 2 * PRT.dq, PRT.dq)
 # HRT settings
 # ============================================================
 
-HRT_DR = 2.0
-HRT_DTHETA = 0.01
+HRT_DR = 1
+HRT_DTHETA = 0.005
 HRT_DTAU = SYSTEM.dt / 4
 
 
