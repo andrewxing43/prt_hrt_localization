@@ -775,6 +775,14 @@ python experiments/single_user.py
 
 The main end-to-end Monte Carlo experiment is:
 
+
+Find your system's supported CUDA version using:
+
+```bash
+nvidia-smi
+```
+
+Then, install as appropriate:
 ```bash
 python experiments/single_user.py
 ```
@@ -800,3 +808,8 @@ accurate refinement using the exact spherical-wave model
 ```
 
 The PRT provides efficient coarse estimates of range, angle, and arrival time. The ROI converts the PRT uncertainty into a compact three-dimensional search region. The HRT then refines the estimate with the exact spherical-wave geometry, producing the final `(R, θ, τ)` and Cartesian `(x, y)` localization result.
+
+You may also need to install CUDA toolkit headers (replace with ```cuda11x``` if needed):
+```bash
+pip install cupy-cuda12x[ctk]
+```
