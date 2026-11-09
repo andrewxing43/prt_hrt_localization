@@ -1,5 +1,5 @@
 
-"""Single-user localization: PRT -> ROI -> HRT -> Downsampled Powell."""
+"""Random single-user evaluation using the exact multi_user_final SIC algorithm."""
 
 from pathlib import Path
 import sys
@@ -8,31 +8,19 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import minimize
+from experiments import multi_user_final as multi_pipeline
 from tqdm import trange
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from config import C, SYSTEM, ARRAY, SIM
 from signal_model.propagation import propagation_delays, received_signal
 from signal_model.noise import add_awgn
-from localization.pipeline import localize
 
 # ==================== Settings ====================
-N_MC = 2000
+N_MC = 500
 R_MIN, R_MAX = 50.0, 400.0
 THETA_MIN, THETA_MAX = -60.0, 60.0
 CLOCK_OFFSET = 10e-9
-
-ANTENNA_STRIDE = 2
-TIME_STRIDE = 2
-
-POWELL_DR = 2.0
-POWELL_DTHETA = 0.02
-POWELL_DTAU = SYSTEM.dt
-POWELL_MAXITER = 100
-POWELL_FTOL = 1e-10
-POWELL_XTOL = 1e-6
-
 
 def polar_to_xy(R, theta):
     t = np.deg2rad(theta)
@@ -49,88 +37,18 @@ def build_time_axis(R, theta, antenna_x):
     return np.arange(n0, n1 + 1) * SYSTEM.dt
 
 
-def reconstruct(t, x, R, theta, tau):
-    rx, _ = received_signal(
-        t, float(R), float(theta),
-        clock_offset=float(tau) - float(R) / C,
-        antenna_x=x
-    )
-    return rx
-
-
-def residual_energy(rx, t, x, R, theta, tau):
-    e = rx - reconstruct(t, x, R, theta, tau)
-    return float(np.vdot(e, e).real)
-
-
-# ==================== Powell Refinement ====================
-def powell_refine(rx, t, antenna_x, R0, theta0, tau0):
-
-    # Downsampling for optimization
-    x_sub = antenna_x[::ANTENNA_STRIDE]
-    t_sub = t[::TIME_STRIDE]
-    rx_sub = rx[::ANTENNA_STRIDE, ::TIME_STRIDE]
-
-    bounds = [
-        (max(R_MIN, R0 - POWELL_DR),
-         min(R_MAX, R0 + POWELL_DR)),
-        (max(THETA_MIN, theta0 - POWELL_DTHETA),
-         min(THETA_MAX, theta0 + POWELL_DTHETA)),
-        (-POWELL_DTAU * 1e9, POWELL_DTAU * 1e9)
-    ]
-
-    x0 = np.array([
-        np.clip(R0, *bounds[0]),
-        np.clip(theta0, *bounds[1]),
-        0.0
-    ])
-
-    scale = max(np.vdot(rx_sub, rx_sub).real, 1e-30)
-
-    def objective(z):
-        R, theta, dtau_ns = z
-        tau = tau0 + dtau_ns * 1e-9
-        return residual_energy(
-            rx_sub, t_sub, x_sub, R, theta, tau
-        ) / scale
-
-    result = minimize(
-        objective, x0,
-        method="Powell",
-        bounds=bounds,
-        options={
-            "maxiter": POWELL_MAXITER,
-            "ftol": POWELL_FTOL,
-            "xtol": POWELL_XTOL
-        }
-    )
-
-    # Full-resolution validation
-    E0 = residual_energy(rx, t, antenna_x, R0, theta0, tau0)
-
-    if np.all(np.isfinite(result.x)):
-        R1, theta1, dtau_ns = result.x
-        tau1 = tau0 + dtau_ns * 1e-9
-        E1 = residual_energy(rx, t, antenna_x, R1, theta1, tau1)
-
-        if np.isfinite(E1) and E1 < E0:
-            return float(R1), float(theta1), float(tau1), True
-
-    return float(R0), float(theta0), float(tau0), False
-
-
 # ==================== Monte Carlo ====================
 def main():
     antenna_x = ARRAY.positions(SYSTEM)
     rng_pos = np.random.default_rng(SIM.rng_seed)
     rng_noise = np.random.default_rng(SIM.rng_seed + 1)
 
-    errors = np.zeros(N_MC)
+    errors = np.full(N_MC, np.nan)
     snrs = np.zeros(N_MC)
     positions = np.zeros((N_MC, 2))
-    accepted = 0
+    matched_trials = 0
 
-    for i in trange(N_MC, desc="PRT -> ROI -> HRT -> Powell"):
+    for i in trange(N_MC, desc="Single user: multi-user pipeline"):
 
         # 1. Random user
         R_true = rng_pos.uniform(R_MIN, R_MAX)
@@ -147,40 +65,44 @@ def main():
         )
         noisy_rx, _ = add_awgn(clean_rx, rng=rng_noise)
 
-        # 3. PRT -> ROI -> HRT
-        result = localize(
-            noisy_rx, t, antenna_x, theta_true, tau_true
-        )
+        # Use the same assisted search, candidates, joint Powell and SIC stopping
+        # as multi_user_final, without informing the detector to stop at one user.
+        previous_users = multi_pipeline.USERS
+        try:
+            multi_pipeline.USERS = [{
+                "range_m": R_true, "theta_deg": theta_true,
+                "tau_ns": tau_true * 1e9,
+            }]
+            detected, _ = multi_pipeline.run_sic(noisy_rx, t, antenna_x)
+        finally:
+            multi_pipeline.USERS = previous_users
 
-        # 4. Downsampled Powell (fixed amplitude)
-        R_hat, theta_hat, tau_hat, success = powell_refine(
-            noisy_rx, t, antenna_x,
-            result.R, result.theta, result.tau
-        )
-        accepted += int(success)
-
-        # 5. Final localization error
-        x_hat, y_hat = polar_to_xy(R_hat, theta_hat)
-        errors[i] = np.hypot(x_hat - x_true, y_hat - y_true)
         positions[i] = [x_true, y_true]
-
+        if len(detected) == 1:
+            errors[i] = np.hypot(
+                detected[0]["x_m"] - x_true, detected[0]["y_m"] - y_true
+            )
+            matched_trials += 1
         snrs[i] = SIM.reference_snr_db + 20 * np.log10(
             SIM.reference_range / R_true
         )
 
     # ==================== Statistics ====================
-    ALE = np.mean(errors)
-    RMSE = np.sqrt(np.mean(errors**2))
-    MAX_ERROR = np.max(errors)
+    valid = np.isfinite(errors)
+    errors = errors[valid]
+    positions = positions[valid]
+    ALE = float(np.mean(errors)) if errors.size else np.nan
+    RMSE = float(np.sqrt(np.mean(errors**2))) if errors.size else np.nan
+    MAX_ERROR = float(np.max(errors)) if errors.size else np.nan
 
     print("\n" + "=" * 55)
-    print("Single User Localization: PRT + ROI + HRT + Powell")
+    print("Single User Localization: multi_user_final algorithm")
     print("=" * 55)
     print(f"Monte Carlo trials : {N_MC}")
-    print(f"Antenna stride     : {ANTENNA_STRIDE}")
-    print(f"Time stride        : {TIME_STRIDE}")
+    print(f"Antenna stride     : {multi_pipeline.ANTENNA_STRIDE}")
+    print(f"Time stride        : {multi_pipeline.TIME_STRIDE}")
     print("Amplitude gain     : Fixed (alpha = 1)")
-    print(f"Powell accepted    : {accepted}/{N_MC}")
+    print(f"Error samples      : {matched_trials}")
     print(f"Tx power           : {SIM.tx_power_dbm:.3f} dBm")
     print(f"SNR range          : {snrs.min():.3f} ~ {snrs.max():.3f} dB")
     print("-" * 55)
@@ -191,7 +113,7 @@ def main():
 
     # ==================== Figure 1: CDF ====================
     x = np.sort(errors)
-    y = np.arange(1, N_MC + 1) / N_MC
+    y = np.arange(1, errors.size + 1) / errors.size if errors.size else np.array([])
 
     plt.figure(figsize=(8, 5))
     plt.plot(x, y, lw=2, color="tab:blue")
@@ -218,7 +140,7 @@ def main():
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
-    ax.set_title("Spatial Localization Error: PRT + HRT + Powell")
+    ax.set_title("Spatial Localization Error: multi_user_final algorithm")
     ax.grid(True, alpha=0.3)
 
     divider = make_axes_locatable(ax)
@@ -228,7 +150,7 @@ def main():
 
     ax.text(
         0.02, 0.98,
-        f"N={N_MC}\nALE={ALE:.3f} m\nRMSE={RMSE:.3f} m",
+        f"Samples={matched_trials}\nALE={ALE:.3f} m\nRMSE={RMSE:.3f} m",
         transform=ax.transAxes,
         va="top", ha="left",
         bbox=dict(

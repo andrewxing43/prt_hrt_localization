@@ -30,7 +30,7 @@ from localization.pipeline import (
 
 # ==================== Configuration ====================
 
-N_MC_PER_COUNT = 2
+N_MC_BY_USER_COUNT = {1: 600, 2: 300, 3: 200}
 MC_SEED = 2026
 R_MIN, R_MAX = 50.0, 400.0
 TH_MIN, TH_MAX = -60.0, 60.0
@@ -496,12 +496,11 @@ def plot_results(stats, records):
     draw_sector(ax)
     xmax = R_MAX * np.sin(np.deg2rad(max(abs(TH_MIN), abs(TH_MAX))))
     ax.set(xlim=(-xmax - 25, xmax + 25), ylim=(0, R_MAX + 25),
-           xlabel="x (m)", ylabel="y (m)", title="Spatial Localization Error")
+           xlabel="x (m)", ylabel="y (m)")
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.3)
     s = stats["all"]
     ax.text(0.02, 0.98,
-            f"Samples={len(good)}, users={s['matched_users']}\n"
             f"ALE={s['ale_m']:.3f} m\nRMSE={s['rmse_m']:.3f} m",
             transform=ax.transAxes, va="top",
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray"))
@@ -576,9 +575,11 @@ def monte_carlo():
     assert PRT_THETA_MIN <= TH_MIN < TH_MAX <= PRT_THETA_MAX
     assert TOA_MIN_NS < TOA_MAX_NS
     assert TOA_MIN_NS > R_MAX / C * 1e9
-    assert N_MC_PER_COUNT > 0
+    assert set(N_MC_BY_USER_COUNT) == {1, 2, 3}
+    assert all(isinstance(count, int) and count > 0
+               for count in N_MC_BY_USER_COUNT.values())
     rng = np.random.default_rng(MC_SEED)
-    schedule = np.repeat([1, 2, 3], N_MC_PER_COUNT)
+    schedule = np.repeat([1, 2, 3], [N_MC_BY_USER_COUNT[n] for n in (1, 2, 3)])
     rng.shuffle(schedule)
     x = ARRAY.positions(SYSTEM)
     records = []
