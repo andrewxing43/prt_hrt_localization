@@ -34,9 +34,9 @@ from localization.pipeline import (
 # ============================================================
 
 R1 = 50.2
-R2 = 395.2
+R2 = 300.2
 
-THETA_DEG = 50.1
+THETA_DEG = 0
 
 BASE_CLOCK_OFFSET = 10e-9
 

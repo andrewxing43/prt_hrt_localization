@@ -26,9 +26,8 @@ from localization.pipeline import (
 # ============================================================
 
 USERS = [
-    {"range_m": 300.1, "theta_deg": 59.7},
-    {"range_m": 150.1, "theta_deg": 59.7},
-    {"range_m": 60.2, "theta_deg": 59.7},
+    {"range_m": 75.43, "theta_deg": -57.8620},
+    {"range_m": 75.43, "theta_deg": -57.3630},
 ]
 
 BASE_CLOCK_OFFSET = 10e-9
