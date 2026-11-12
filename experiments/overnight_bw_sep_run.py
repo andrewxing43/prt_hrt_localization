@@ -1,13 +1,6 @@
-"""Overnight, template-free HRT bandwidth and blind two-source studies.
-
-Copy this one file into experiments/ of the localization repo and run:
-    python experiments/overnight_bandwidth_and_separation.py
-
-Outputs go into experiments/overnight_bw_separation_results/. All estimates
-use the *recorded* time grid (no Fourier time oversampling), raw complex
-received samples, and no matched filter or supplied source count. The HRT
-search is a declared broadside (theta=0) slice, R=30..75 m: this experiment
-tests range/arrival separation, not blind angle estimation.
+"""
+Blind two source HRT studies
+Varying BW and the gap between the two sources in time of arrival
 """
 
 import csv
@@ -25,7 +18,7 @@ from scipy.signal import find_peaks
 HERE = Path(__file__).resolve().parent
 ROOT = HERE if (HERE / "config.py").is_file() else HERE.parent
 if not (ROOT / "config.py").is_file():
-    ROOT = HERE / "sic2_integration_fixture"  # Local standalone fixture.
+    ROOT = HERE / "sic2_integration_fixture"
 sys.path.insert(0, str(ROOT))
 
 from config import C, SYSTEM, ARRAY, SIM
