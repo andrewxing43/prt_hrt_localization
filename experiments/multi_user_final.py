@@ -1,5 +1,8 @@
 
-"""Monte Carlo multi-user localization: PRT -> ROI -> HRT -> Powell -> SIC."""
+"""Monte Carlo multi-user localization with HRT-initialized joint Powell refinement and SIC.
+
+Run from within the original project; displays statistics and figures without saving data.
+"""
 
 from pathlib import Path
 from contextlib import redirect_stdout
@@ -9,7 +12,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import io
-import csv
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,24 +42,13 @@ MIN_RANGE_SEP_M = 100.0
 MIN_ANGLE_SEP_DEG = 1.0
 MIN_TOA_SEP_PS = 125.0
 MAX_GENERATION_ATTEMPTS = 10000
-CSV_PATH = ROOT / "experiments" / "multi_user_localization_errors.csv"
 
 HRT_STOP_THRESHOLD = 6e-6
 MAX_SIC_ITERATIONS = 3
 
-SEARCH_R_STEP = 4.0
-SEARCH_THETA_OFFSETS = [-0.15, 0.0, 0.15]
-SEARCH_TAU_OFFSETS_NS = [-0.015, 0.0, 0.015]
-
 ANTENNA_STRIDE = 2
 TIME_STRIDE = 2
-N_CANDIDATES = 2
-
-SEP_R = 8.0
-SEP_THETA = 0.01
-SEP_TAU_PS = 1.0
-
-REFINE_R = 15.0
+REFINE_R = 50.0
 REFINE_THETA = 0.25
 REFINE_TAU_NS = 0.035
 
@@ -151,7 +142,7 @@ def run_prt(mf, t, x, p_grid, tau_indices):
         "peak": float(score[ti, pi, qi])
     }
 
-# ==================== Exact Model Search ====================
+# ==================== Subsampling ====================
 
 def subsample(y, t, x):
     return (
@@ -160,69 +151,6 @@ def subsample(y, t, x):
         x[::ANTENNA_STRIDE]
     )
 
-def search_candidates(residual, t, x, seeds):
-    ys, ts, xs = subsample(residual, t, x)
-
-    R_grid = np.unique(np.r_[
-        np.arange(PRT_R_MIN, PRT_R_MAX, SEARCH_R_STEP),
-        PRT_R_MIN, PRT_R_MAX
-    ])
-
-    theta_grid = np.unique([
-        u["theta_deg"] + d
-        for u in USERS
-        for d in SEARCH_THETA_OFFSETS
-        if PRT_THETA_MIN <= u["theta_deg"] + d <= PRT_THETA_MAX
-    ])
-
-    tau_hints = [user_tau(u) for u in USERS]
-    # Include every user's TOA hint, including the middle user in a 3-user scene.
-    tau_centers = tau_hints
-
-    tau_grid = np.unique([
-        tc + d * 1e-9
-        for tc in tau_centers
-        for d in SEARCH_TAU_OFFSETS_NS
-    ])
-
-    candidates = []
-
-    def add_candidate(R, theta, tau):
-        template = reconstruct(ts, xs, R, theta, tau)
-        score = energy(ys) - energy(ys - template)
-        candidates.append({
-            "R": float(R), "theta": float(theta),
-            "tau": float(tau), "score": float(score)
-        })
-
-    for theta in theta_grid:
-        for tau in tau_grid:
-            for R in R_grid:
-                add_candidate(R, theta, tau)
-
-    for s in seeds:
-        if (
-            PRT_R_MIN <= s["R"] <= PRT_R_MAX
-            and PRT_THETA_MIN <= s["theta"] <= PRT_THETA_MAX
-        ):
-            add_candidate(s["R"], s["theta"], s["tau"])
-
-    candidates.sort(key=lambda z: z["score"], reverse=True)
-
-    selected = []
-    for c in candidates:
-        duplicate = any(
-            abs(c["R"] - v["R"]) < SEP_R
-            and abs(c["theta"] - v["theta"]) < SEP_THETA
-            and abs(c["tau"] - v["tau"]) < SEP_TAU_PS * 1e-12
-            for v in selected
-        )
-        if not duplicate:
-            selected.append(c)
-        if len(selected) >= N_CANDIDATES:
-            break
-
-    return selected
 
 # ==================== Joint Powell ====================
 
@@ -314,31 +242,14 @@ def run_sic(y, t, x):
         if peak <= HRT_STOP_THRESHOLD:
             break
 
-        candidates = search_candidates(
-            residual, t, x,
-            seeds=[prt, {"R": R, "theta": theta, "tau": tau}]
-        )
-
-        best = None
-        best_energy = previous_energy
-
-        for c in candidates:
-            z = np.array([c["R"], c["theta"], c["tau"] * 1e9])
-            trial_vectors = [v.copy() for v in vectors] + [z]
-            trial_bounds = bounds + [parameter_bounds(c)]
-
-            refined, trial_residual, E = joint_refit(
-                y, trial_vectors, trial_bounds, t, x
-            )
-
-            if E < best_energy:
-                best_energy = E
-                best = (refined, trial_bounds, trial_residual)
-
-        if best is None:
+        hrt = {"R": R, "theta": theta, "tau": tau}
+        z = np.array([R, theta, tau * 1e9])
+        trial_vectors = [v.copy() for v in vectors] + [z]
+        trial_bounds = bounds + [parameter_bounds(hrt)]
+        refined, trial_residual, E = joint_refit(y, trial_vectors, trial_bounds, t, x)
+        if not np.isfinite(E) or E >= previous_energy:
             break
-
-        vectors, bounds, residual = best
+        vectors, bounds, residual = refined, trial_bounds, trial_residual
         detected = []
 
         for v in vectors:
@@ -515,60 +426,6 @@ def plot_results(stats, records):
 
 # ==================== Main ====================
 
-def export_user_errors(records):
-    """Consecutive rows with the same monte_carlo_id belong to one scene.
-
-    trial_within_user_count numbers repetitions separately for 1/2/3 users;
-    monte_carlo_id is unique across the complete run.
-    """
-    fields = [
-        "monte_carlo_id", "user_count", "trial_within_user_count",
-        "user_in_trial", "noise_seed", "estimated_user_id",
-        "included_in_error_statistics", "true_R_m", "true_theta_deg", "true_tau_ns",
-        "true_x_m", "true_y_m", "estimated_R_m", "estimated_theta_deg",
-        "estimated_tau_ns", "estimated_x_m", "estimated_y_m",
-        "dx_m", "dy_m", "error_2d_m",
-    ]
-    # Overwrite this CSV each run; figures remain display-only.
-    with CSV_PATH.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        repetitions = {1: 0, 2: 0, 3: 0}
-        for r in sorted(records, key=lambda record: record["trial"]):
-            repetitions[r["true_n"]] += 1
-            valid = r["status"] == "SUCCESS"
-            a = positions_from_users(r["truth"])
-            b = positions_from_users(r["estimated"], estimated=True)
-            if valid:
-                distances = np.linalg.norm(a[:, None, :] - b[None, :, :], axis=2)
-                rows, cols = linear_sum_assignment(distances)
-                pairs = list(zip(rows, cols))
-            else:
-                pairs = [(i, None) for i in range(len(a))]
-                pairs += [(None, j) for j in range(len(b))]
-            for i, j in pairs:
-                row = {
-                    "monte_carlo_id": r["trial"], "user_count": r["true_n"],
-                    "trial_within_user_count": repetitions[r["true_n"]],
-                    "noise_seed": r["noise_seed"],
-                    "included_in_error_statistics": int(valid),
-                }
-                if i is not None:
-                    u = r["truth"][i]
-                    row.update(user_in_trial=int(i) + 1, true_R_m=u["range_m"],
-                               true_theta_deg=u["theta_deg"], true_tau_ns=u["tau_ns"],
-                               true_x_m=a[i, 0], true_y_m=a[i, 1])
-                if j is not None:
-                    u = r["estimated"][j]
-                    row.update(estimated_user_id=int(j) + 1, estimated_R_m=u["range_m"],
-                               estimated_theta_deg=u["theta_deg"], estimated_tau_ns=u["tau_s"] * 1e9,
-                               estimated_x_m=b[j, 0], estimated_y_m=b[j, 1])
-                if valid:
-                    row.update(dx_m=b[j, 0] - a[i, 0], dy_m=b[j, 1] - a[i, 1],
-                               error_2d_m=r["errors"][i])
-                writer.writerow(row)
-
-
 def monte_carlo():
     global USERS
     assert PRT_R_MIN <= R_MIN < R_MAX <= PRT_R_MAX
@@ -603,7 +460,6 @@ def monte_carlo():
             "initial_energy": energy(noisy_rx), "residual_energy": energy(residual),
         }
         records.append(record)
-    export_user_errors(records)
     stats = print_summary(records)
     plot_results(stats, records)
     return records, stats
