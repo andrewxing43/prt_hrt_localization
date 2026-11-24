@@ -1,36 +1,11 @@
 """
-固定用户位置和噪声，比较单用户、双用户、三用户定位误差。
+Compare localization errors across one-, two-, and three-user scenes.
 
-保存位置：
-    experiments/paired_user_comparison.py
-
-运行：
-    python experiments/paired_user_comparison.py
-
-依赖：
-    原项目及其依赖，包括可用的 CUDA/CuPy。
-
-每个配对块：
-    生成用户 A、B、C。
-    单用户场景：A、B、C
-    双用户场景：AB、AC、BC
-    三用户场景：ABC
-
-同一配对块中的七个场景：
-    1. 用户参数保持不变。
-    2. 使用相同阵列和时间轴。
-    3. 使用完全相同的接收机噪声。
-    4. 复用 multi_user_final.py 中的原始定位算法。
-
-输出：
-    paired_user_results.csv
-        每个场景、每个真实用户的估计结果。
-    paired_user_comparison.csv
-        严格配对的用户级误差比较。
-
-注意：
-    原算法使用真实角度、tau 作为辅助搜索提示。
-    本脚本保留此设定。
+Run with python experiments/multi_user_test.py in an environment with CUDA and CuPy.
+Each block runs A, B, C, AB, AC, BC, and ABC with the same array, time axis,
+user parameters, and receiver noise. Localization reuses multi_user_final.py.
+paired_user_results.csv stores per-scene estimates.
+paired_user_comparison.csv stores paired user-level errors.
 """
 
 from pathlib import Path
@@ -44,10 +19,10 @@ from tqdm import tqdm
 import multi_user_final as core
 
 
-# ==================== 配置 ====================
+# Configuration
 
-# 每个配对块运行七个场景。
-# 建议先设置为 2，确认环境可正常运行后再增加。
+# Each block runs seven scenes.
+# Use two blocks for a quick environment check.
 N_BLOCKS = 40
 
 POSITION_SEED = 2026
@@ -57,11 +32,11 @@ OUTPUT_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = OUTPUT_DIR / "paired_user_results.csv"
 COMPARISON_CSV = OUTPUT_DIR / "paired_user_comparison.csv"
 
-# 原算法默认会由底层函数打印信息，这里保留其静默行为。
+# Show the paired comparison plots.
 SHOW_PLOTS = True
 
 
-# ==================== 工具函数 ====================
+# Helpers
 
 def scene_name(indices):
     return "".join("ABC"[i] for i in indices)
@@ -69,11 +44,8 @@ def scene_name(indices):
 
 def match_estimates(truth, detected):
     """
-    返回：
-        errors：按真实用户顺序排列的二维误差；
-        matched：按真实用户顺序排列的估计结果。
-
-    若人数不一致，则不强制配对。
+    Return 2D errors and matched estimates in true-user order.
+    Pairing requires equal true and estimated user counts.
     """
     if len(truth) != len(detected):
         return None, None
@@ -140,7 +112,7 @@ def write_csv(path, rows, fields):
         writer.writerows(rows)
 
 
-# ==================== 单个场景 ====================
+# Individual scene
 
 def run_scene(
     block_id,
@@ -155,14 +127,14 @@ def run_scene(
 ):
     truth = [dict(base_users[i]) for i in indices]
 
-    # 原算法通过全局 USERS 读取本场景的真实参数提示。
+    # The core reads search hints for this scene from USERS.
     core.USERS = truth
 
     clean_rx = np.zeros_like(noise)
     for i in indices:
         clean_rx += components[i]
 
-    # 同一个 block 中，所有场景使用完全相同的噪声矩阵。
+    # All scenes in the block use the same noise matrix.
     noisy_rx = clean_rx + noise
 
     with core.redirect_stdout(core.io.StringIO()):
@@ -241,18 +213,13 @@ def run_scene(
     return record, rows
 
 
-# ==================== 严格配对统计 ====================
+# Strictly paired statistics
 
 def build_paired_rows(block_records, base_users, block_id):
     """
-    仅当本 block 的七个场景全部检出人数正确时纳入。
-
-    每个基础用户：
-        单用户：一个误差；
-        双用户：两个误差，分别对应两个不同干扰用户；
-        三用户：一个误差。
-
-    保留两个双用户误差，避免先平均误差再计算 RMSE。
+    Include only blocks with correct counts in all seven scenes.
+    Each base user contributes one single-user, two two-user, and one
+    three-user error. Keep both two-user errors when computing RMSE.
     """
     if not all(
         r["status"] == "SUCCESS"
@@ -305,12 +272,12 @@ def build_paired_rows(block_records, base_users, block_id):
 def print_paired_summary(paired_rows, total_blocks):
     valid_blocks = len(paired_rows) // 3
 
-    print("\n严格配对统计：仅保留七个场景均检出人数正确的块")
-    print(f"有效配对块：{valid_blocks}/{total_blocks}")
-    print(f"相同位置的基础用户数：{len(paired_rows)}")
+    print("\nStrictly paired statistics (correct counts in all seven scenes)")
+    print(f"Valid paired blocks: {valid_blocks}/{total_blocks}")
+    print(f"Base users at shared positions: {len(paired_rows)}")
 
     if not paired_rows:
-        print("没有完整有效的配对块。")
+        print("No complete paired blocks.")
         return
 
     single = [r["single_error_m"] for r in paired_rows]
@@ -357,30 +324,30 @@ def print_paired_summary(paired_rows, total_blocks):
     ])
 
     print(
-        "\n严格配对统计中，三组的真实位置分布完全一致，"
-        f"平均距离均为 {mean_r:.6f} m。"
+        "\nAll three groups use the same true position distribution. "
+        f"The mean range is {mean_r:.6f} m in each group."
     )
-    print("双用户组每个基础用户出现两次，权重相同。")
+    print("Each base user appears twice in the two-user group, with equal weight.")
     print(
-        f"平均误差差值，双用户减单用户："
+        f"Mean error difference (two users minus one): "
         f"{delta_two:+.6f} m"
     )
     print(
-        f"平均误差差值，三用户减单用户："
+        f"Mean error difference (three users minus one): "
         f"{delta_three:+.6f} m"
     )
-    print("差值为正表示多用户误差更大。")
+    print("Positive differences indicate larger multi-user errors.")
 
 
-# ==================== 主程序 ====================
+# Main
 
 def main():
     if N_BLOCKS <= 0:
-        raise ValueError("N_BLOCKS 必须为正整数。")
+        raise ValueError("N_BLOCKS must be a positive integer.")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 使用相互独立的随机流生成位置与噪声。
+    # Use independent random streams for positions and noise.
     position_rng = np.random.default_rng(POSITION_SEED)
     x = core.ARRAY.positions(core.SYSTEM)
 
@@ -404,18 +371,16 @@ def main():
             unit="scene",
         ) as progress:
             for block_id in range(1, N_BLOCKS + 1):
-                # 三个基础用户满足原算法的两两分离条件。
+                # Enforce the core experiment's pairwise separation constraints.
                 base_users = core.generate_users(
                     position_rng, 3
                 )
 
-                # 时间轴由三个基础用户共同确定。
-                # 七个场景均使用该时间轴，避免采样窗口不同。
+                # Build one time axis from all three base users and reuse it in all scenes.
                 core.USERS = base_users
                 t = core.build_time_axis(x)
 
-                # 每个基础用户只生成一次无噪声信号，
-                # 各场景直接复用，确保信号参数完全一致。
+                # Generate each clean user signal once and reuse it across scenes.
                 components = [
                     core.reconstruct(
                         t,
@@ -429,7 +394,7 @@ def main():
 
                 noise_seed = NOISE_SEED + block_id
 
-                # 对零信号加噪，得到接收机噪声本身。
+                # Add noise to a zero signal to isolate receiver noise.
                 noise, _ = core.add_awgn(
                     np.zeros_like(components[0]),
                     rng=np.random.default_rng(noise_seed),
@@ -466,7 +431,7 @@ def main():
                     )
                 )
 
-                # 每完成一个配对块就保存，保留已完成结果。
+                # Save after each block to retain completed results.
                 write_csv(
                     RESULTS_CSV,
                     result_rows,
@@ -482,7 +447,7 @@ def main():
     finally:
         core.USERS = previous_users
 
-    print("\n各组人数检出情况")
+    print("\nUser-count detection by group")
     for n in (1, 2, 3):
         group = [
             r for r in records if r["true_n"] == n
@@ -494,20 +459,20 @@ def main():
         over = sum(r["status"] == "OVER" for r in group)
 
         print(
-            f"{n} 用户：场景数={len(group)}，"
-            f"人数正确={success}，少检={miss}，多检={over}"
+            f"{n} user(s): scenes={len(group)}, "
+            f"correct count={success}, undercounts={miss}, overcounts={over}"
         )
 
-    print("\n原统计口径：分别保留各组人数正确的场景")
+    print("\nPer-group statistics (scenes with correct user counts)")
     stats = core.print_summary(records)
 
     print_paired_summary(paired_rows, N_BLOCKS)
 
-    print(f"\n场景结果：{RESULTS_CSV}")
-    print(f"严格配对结果：{COMPARISON_CSV}")
+    print(f"\nScene results: {RESULTS_CSV}")
+    print(f"Strictly paired results: {COMPARISON_CSV}")
 
     if SHOW_PLOTS:
-        # 图片使用严格配对样本，保证位置分布一致。
+        # Plot strictly paired samples so all groups share the same position distribution.
         valid_block_ids = {
             r["block_id"] for r in paired_rows
         }
@@ -533,7 +498,7 @@ def main():
                 paired_stats, paired_records
             )
         else:
-            print("无有效严格配对样本，跳过绘图。")
+            print("No valid strictly paired samples to plot.")
 
     return records, paired_rows, stats
 
