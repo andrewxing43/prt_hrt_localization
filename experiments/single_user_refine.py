@@ -17,7 +17,7 @@ from signal_model.propagation import propagation_delays, received_signal
 from signal_model.noise import add_awgn
 
 # ==================== Settings ====================
-N_MC = 500
+N_MC = 600
 R_MIN, R_MAX = 50.0, 400.0
 THETA_MIN, THETA_MAX = -60.0, 60.0
 CLOCK_OFFSET = 10e-9
